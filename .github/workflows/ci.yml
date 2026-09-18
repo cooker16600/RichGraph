@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: gcc
+            cxx: g++
+            build_type: Release
+          - cc: clang
+            cxx: clang++
+            build_type: Debug
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libtbb-dev libgflags-dev
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DRICHGRAPH_BUILD_BENCHMARKS=OFF
+          -DRICHGRAPH_USE_TCMALLOC=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install
+        run: cmake --install build --prefix "$RUNNER_TEMP/richgraph"
+      - name: Test installed package
+        run: |
+          cmake -S test/package_consumer -B consumer-build -G Ninja \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/richgraph"
+          cmake --build consumer-build
+          ./consumer-build/richgraph_package_consumer
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=0:strict_string_checks=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libtbb-dev libgflags-dev
+      - name: Configure ASan and UBSan
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DRICHGRAPH_ENABLE_ASAN=ON
+          -DRICHGRAPH_ENABLE_UBSAN=ON
+          -DRICHGRAPH_BUILD_BENCHMARKS=OFF
+          -DRICHGRAPH_USE_TCMALLOC=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  thread-sanitizer:
+    runs-on: ubuntu-24.04
+    env:
+      TSAN_OPTIONS: halt_on_error=1:history_size=7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libtbb-dev libgflags-dev
+      - name: Configure TSan
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DRICHGRAPH_ENABLE_TSAN=ON
+          -DRICHGRAPH_USE_OPENMP=OFF
+          -DRICHGRAPH_BUILD_BENCHMARKS=OFF
+          -DRICHGRAPH_BUILD_EXAMPLES=OFF
+          -DRICHGRAPH_USE_TCMALLOC=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

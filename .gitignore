@@ -1,0 +1,39 @@
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# CMake and compiler outputs
+build*/
+cmake-build-*/
+bin/
+compile_commands.json
+*.gch
+*.pch
+*.so
+*.dylib
+*.exe
+*.out
+*.app
+*.o
+
+# Python outputs
+__pycache__/
+*.py[cod]
+
+# Editor helpers
+.clang_complete
+.ycm_extra_conf.py
+
+# Generated databases, logs, and scratch data
+backup/
+data/
+graphdata/
+tmp/
+*.cp
+*.log
+data.txt
+
+# Locally compiled standalone research tools
+/test/attr_grouping
+/tools/compute_logical_graph_stats

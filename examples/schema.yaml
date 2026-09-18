@@ -1,0 +1,16 @@
+max_vertex_num: 1024
+use_csr_disk: false
+sub_property_num: 1
+max_property_length: 32
+system_threads: 2
+property_defs:
+  - name: amount
+    length: 32
+  - name: name
+    length: 32
+edge_shards:
+  - name: edge_Db0
+    properties: [amount]
+node_db:
+  name: node_Db
+  properties: [name]

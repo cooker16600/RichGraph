@@ -1,0 +1,11 @@
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-braces-around-statements
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(include/richgraph|src/(graph_db|options|property_.*))/'
+FormatStyle: file

@@ -1,0 +1,22 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads)
+find_dependency(TBB COMPONENTS tbb)
+
+find_package(gflags CONFIG QUIET)
+if(NOT TARGET gflags::gflags AND
+   NOT TARGET gflags::gflags_shared AND
+   NOT TARGET gflags_shared AND
+   NOT TARGET gflags)
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+  find_dependency(GFlags)
+endif()
+
+if(@RICHGRAPH_CONFIG_NEEDS_OPENMP@)
+  find_dependency(OpenMP COMPONENTS CXX)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/RichGraphTargets.cmake")
+check_required_components(RichGraph)
