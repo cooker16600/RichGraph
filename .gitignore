@@ -34,6 +34,5 @@ tmp/
 *.log
 data.txt
 
-# Locally compiled standalone research tools
+# Locally compiled standalone research tool
 /test/attr_grouping
-/tools/compute_logical_graph_stats
