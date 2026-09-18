@@ -114,14 +114,6 @@ back to the base SST value. A clean close flushes pending updates and waits for
 background work. Use `FlushPropertyUpdates()` when the application needs an
 explicit persistence barrier.
 
-More detail is in:
-
-- `docs/architecture/overview.md`
-- `docs/consistency-and-durability.md`
-- `docs/file-formats.md`
-- `docs/benchmarking.md`
-- `docs/known-limitations.md`
-
 ## Optional targets and instrumentation
 
 FinBench/SNB programs are research benchmarks and are not part of the default
@@ -164,10 +156,9 @@ ctest --test-dir build-tsan --output-on-failure
 
 ## Project status
 
-RichGraph is still a research system. Read `docs/known-limitations.md` before
-using it for production data. The first public release is an experimental
-`0.x` paper artifact; its C++ API and on-disk formats may change without
-backward compatibility before `1.0`.
+RichGraph is still a research system. The first public release is an
+experimental `0.x` paper artifact; its C++ API and on-disk formats may change
+without backward compatibility before `1.0`.
 
 The source tree also contains small adapted portions of LevelDB, LiveGraph,
 and RocksDB; their provenance is summarized in `THIRD_PARTY_NOTICES.md`.
