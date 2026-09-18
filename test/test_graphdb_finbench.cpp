@@ -104,9 +104,6 @@ DEFINE_uint32(finbench_memtable_num,
 DEFINE_uint32(finbench_memproperty_num,
               2,
               "Compatibility name for the engine property-buffer count.");
-DEFINE_bool(finbench_enable_memproperty,
-            false,
-            "Deprecated compatibility flag. GraphDb owns property buffering.");
 DEFINE_uint32(finbench_memtable_size,
               3050403,
               "Memtable size used by the underlying stores.");
@@ -219,10 +216,6 @@ DEFINE_string(finbench_update_workload_path,
               "Optional custom single-property update workload. Supported rows: "
               "N|vid|property|value and E|src|dst|edgeType|isOut|property|value. "
               "Comma delimiters are also accepted.");
-DEFINE_string(finbench_update_delta_dir,
-              "",
-              "Deprecated compatibility flag. Engine-owned deltas are stored "
-              "under each shard's property-delta directory.");
 DEFINE_uint64(finbench_update_node_memproperty_cap,
               1920000,
               "Compatibility input for the engine PropertyBuffer record cap.");
@@ -292,19 +285,6 @@ struct CsvHeader {
 
   static constexpr size_t kMissingIndex = std::numeric_limits<size_t>::max();
 
-  bool Has(std::string_view name) const {
-    return name_to_idx.find(std::string(name)) != name_to_idx.end();
-  }
-
-  bool Has(const std::string& name) const {
-    return name_to_idx.find(name) != name_to_idx.end();
-  }
-
-  size_t Index(std::string_view name) const {
-    const auto it = name_to_idx.find(std::string(name));
-    return it == name_to_idx.end() ? kMissingIndex : it->second;
-  }
-
   size_t Index(const std::string& name) const {
     const auto it = name_to_idx.find(name);
     return it == name_to_idx.end() ? kMissingIndex : it->second;
@@ -322,18 +302,6 @@ struct CsvHeader {
 struct CsvRow {
   const CsvHeader* header = nullptr;
   std::vector<std::string> fields;
-
-  const std::string& Get(std::string_view name) const {
-    static const std::string kEmpty;
-    if (header == nullptr) {
-      return kEmpty;
-    }
-    const size_t idx = header->Index(name);
-    if (idx == CsvHeader::kMissingIndex || idx >= fields.size()) {
-      return kEmpty;
-    }
-    return fields[idx];
-  }
 
   const std::string& Get(const std::string& name) const {
     static const std::string kEmpty;
@@ -801,17 +769,6 @@ struct PreparedNodeWrite {
   bool sample_write_latency = false;
   uint64_t scheduled_time = 0;
 
-  explicit PreparedNodeWrite(
-      std::pmr::memory_resource* mr = std::pmr::get_default_resource())
-      : payload(mr), node_cold_payload(mr) {}
-
-  PreparedNodeWrite(vertex_t id_in,
-                    PmrString payload_in,
-                    uint64_t scheduled_time_in)
-      : id(id_in),
-        payload(std::move(payload_in)),
-        scheduled_time(scheduled_time_in) {}
-
   PreparedNodeWrite(vertex_t id_in,
                     PmrString payload_in,
                     PmrString node_cold_payload_in,
@@ -900,11 +857,6 @@ std::string Trim(std::string s) {
   return s;
 }
 
-bool EndsWith(const std::string& s, const std::string& suffix) {
-  return s.size() >= suffix.size() &&
-         s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
 bool IsDigitsOnly(const std::string& s) {
   if (s.empty()) {
     return false;
@@ -960,15 +912,6 @@ uint64_t HashMix(uint64_t x) {
   x *= 0xc4ceb9fe1a85ec53ULL;
   x ^= x >> 33U;
   return x;
-}
-
-uint64_t HashStrings(const std::vector<std::string>& values) {
-  uint64_t seed = 0x9e3779b97f4a7c15ULL;
-  for (const auto& v : values) {
-    seed ^= HashMix(std::hash<std::string>{}(v))
-            + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-  }
-  return seed;
 }
 
 double ToDouble(const std::string& s) {
@@ -1244,18 +1187,6 @@ uint16_t NodeColdRefSlot() {
   return static_cast<uint16_t>(it->second);
 }
 
-const std::unordered_map<std::string, size_t>& EdgePropertyIndexByName() {
-  static const std::unordered_map<std::string, size_t> map = [] {
-    std::unordered_map<std::string, size_t> out;
-    const auto& props = AllEdgeProperties();
-    for (size_t i = 0; i < props.size(); ++i) {
-      out.emplace(props[i], i);
-    }
-    return out;
-  }();
-  return map;
-}
-
 // ---- 2-Shard Edge Property Split ----
 // Shard 0 (Hot): attributes used by the current 12 complex-read queries.
 const std::vector<std::string>& EdgeShard0Properties() {
@@ -1290,18 +1221,6 @@ const std::unordered_map<std::string, size_t>& EdgeShard1PropertyIndex() {
   static const std::unordered_map<std::string, size_t> map = [] {
     std::unordered_map<std::string, size_t> out;
     const auto& props = EdgeShard1Properties();
-    for (size_t i = 0; i < props.size(); ++i) {
-      out.emplace(props[i], i);
-    }
-    return out;
-  }();
-  return map;
-}
-
-const std::unordered_map<std::string, size_t>& ColdEdgePropertyIndex() {
-  static const std::unordered_map<std::string, size_t> map = [] {
-    std::unordered_map<std::string, size_t> out;
-    const auto& props = ColdEdgeProperties();
     for (size_t i = 0; i < props.size(); ++i) {
       out.emplace(props[i], i);
     }
@@ -1605,27 +1524,6 @@ bool OpenCsvInput(const std::string& path,
                          static_cast<std::streamsize>(buffer->size()));
   in->open(path, std::ios::in | std::ios::binary);
   return in->is_open();
-}
-
-uint64_t CountDataLines(const std::string& path) {
-  std::ifstream in;
-  std::vector<char> buffer;
-  if (!OpenCsvInput(path, &in, &buffer)) {
-    return 0;
-  }
-  uint64_t line_count = 0;
-  std::string line;
-  bool first = true;
-  while (std::getline(in, line)) {
-    if (first) {
-      first = false;
-      continue;
-    }
-    if (!line.empty()) {
-      ++line_count;
-    }
-  }
-  return line_count;
 }
 
 size_t EstimateCsvRowsBySize(const std::string& path, uint64_t avg_row_bytes) {
@@ -2048,7 +1946,7 @@ void ParallelForIndexDynamicChunk(size_t count,
     return;
   }
 
-  const int omp_chunk =
+  [[maybe_unused]] const int omp_chunk =
       static_cast<int>(std::max<uint32_t>(1U, chunk_size));
 #pragma omp parallel for num_threads(static_cast<int>(thread_count)) schedule(dynamic, omp_chunk)
   for (long long i = 0; i < static_cast<long long>(count); ++i) {
@@ -2179,9 +2077,6 @@ class ColdBlobWriter {
   uint64_t record_count() const { return record_count_; }
   uint64_t payload_bytes() const { return payload_bytes_; }
   uint64_t file_bytes() const { return file_bytes_; }
-  const std::string& path() const { return path_; }
-  uint32_t file_id() const { return file_id_; }
-
  private:
   bool FlushLocked() {
     if (buffer_.empty()) {
@@ -2298,8 +2193,6 @@ class FixedResidentArena {
 
     uint64_t used_bytes() const { return used_; }
     uint64_t max_used_bytes() const { return max_used_; }
-    uint64_t size_bytes() const { return size_; }
-
    private:
     static uint64_t AlignUp(uint64_t value, uint64_t alignment) {
       if (alignment == 0) {
@@ -2500,9 +2393,6 @@ class FinBenchGraphDbTest {
               << std::endl;
     std::cout << "workload_sample_mod: " << WorkloadSampleMod() << std::endl;
     std::cout << "workload_sample_remainder: " << WorkloadSampleRemainder()
-              << std::endl;
-    std::cout << "legacy_memproperty_flag: "
-              << (FLAGS_finbench_enable_memproperty ? "true" : "false")
               << std::endl;
     std::cout << "engine_property_updates: true" << std::endl;
     std::cout << "write_schedule: "
@@ -2761,9 +2651,6 @@ class FinBenchGraphDbTest {
   }
 
   void ResetPreprocessedState() {
-    prepared_snapshot_node_batches_.clear();
-    prepared_snapshot_relation_batches_.clear();
-    prepared_incremental_batches_.clear();
     loaded_param_files_.clear();
     entity_to_vid_.clear();
     materialized_vertices_.clear();
@@ -3231,78 +3118,6 @@ class FinBenchGraphDbTest {
     return stats;
   }
 
-  ImportStats ImportPreprocessedWriteChunk(
-      const prechunk::Chunk& chunk,
-      const prechunk::SchemaCatalog& catalog) {
-    ImportStats stats;
-    auto batch = NewPreparedBatch(chunk.path.filename().string(),
-                                  ImportBatchRows(),
-                                  ImportBatchRows());
-    for (const auto& record : chunk.records) {
-      const prechunk::SchemaInfo* schema = catalog.Find(record.schema_id);
-      if (schema == nullptr) {
-        continue;
-      }
-      if (record.op_code == 1 && schema->kind == "node") {
-        AppendPreprocessedNodeRecord(batch.get(), *schema, record);
-      } else if (record.op_code == 2 && schema->kind == "edge") {
-        AppendPreprocessedEdgeRecord(
-            batch.get(),
-            *schema,
-            record,
-            chunk.stage == prechunk::Stage::kSnapshotEdges);
-      } else {
-        continue;
-      }
-      if (batch->logical_rows >= ImportBatchRows() || LoadArenaNearFull()) {
-        FlushPreparedImportBatch(batch.get(), &stats);
-        ReleasePreparedBatch(&batch, "preprocessed_write");
-        batch = NewPreparedBatch(chunk.path.filename().string(),
-                                 ImportBatchRows(),
-                                 ImportBatchRows());
-      }
-    }
-    FlushPreparedImportBatch(batch.get(), &stats);
-    AddColdBlobFlushTime(&stats);
-    ReleasePreparedBatch(&batch, "preprocessed_write");
-    return stats;
-  }
-
-  MixedWorkloadStats RunPreprocessedMixedChunk(
-      const prechunk::Chunk& chunk,
-      const prechunk::SchemaCatalog& catalog) {
-    MixedWorkloadStats stats;
-    for (int qid = 1; qid <= 12; ++qid) {
-      stats.query_metrics[static_cast<size_t>(qid)].query_id = qid;
-    }
-    auto batch = NewPreparedBatch(chunk.path.filename().string(),
-                                  ImportBatchRows(),
-                                  ImportBatchRows());
-    for (const auto& record : chunk.records) {
-      const prechunk::SchemaInfo* schema = catalog.Find(record.schema_id);
-      if (schema == nullptr) {
-        continue;
-      }
-      if (record.op_code == 1 && schema->kind == "node") {
-        AppendPreprocessedNodeRecord(batch.get(), *schema, record);
-      } else if (record.op_code == 2 && schema->kind == "edge") {
-        AppendPreprocessedEdgeRecord(batch.get(), *schema, record, false);
-      }
-    }
-    PreprocessedQueryTaskStorage query_storage =
-        FLAGS_finbench_mix_enable_queries
-            ? BuildPreprocessedQueryTasks(chunk, catalog)
-            : PreprocessedQueryTaskStorage{};
-    ImportStats import_stats;
-    ExecuteMixedConcurrentBatch(
-        batch.get(), query_storage.tasks, &import_stats, &stats);
-    ReleasePreparedBatch(&batch, "preprocessed_mixed");
-    stats.node_writes += import_stats.node_writes;
-    stats.edge_writes += import_stats.edge_writes;
-    stats.write_sec += import_stats.sec;
-    return stats;
-  }
-
   static void AccumulateMixedStats(MixedWorkloadStats* total,
                                    const MixedWorkloadStats& delta) {
     total->node_writes += delta.node_writes;
@@ -3324,14 +3139,6 @@ class FinBenchGraphDbTest {
       dst.checksum ^= src.checksum;
       dst.sec += src.sec;
     }
-  }
-
-  PreprocessedQueryStats RunPreprocessedQueryChunk(
-      const prechunk::Chunk& chunk,
-      const prechunk::SchemaCatalog& catalog) {
-    PreprocessedQueryTaskStorage storage =
-        BuildPreprocessedQueryTasks(chunk, catalog);
-    return RunPreparedPreprocessedQueryTasks(storage);
   }
 
   PreprocessedQueryStats RunPreparedPreprocessedQueryTasks(
@@ -3670,31 +3477,6 @@ class FinBenchGraphDbTest {
     PrintEngineUpdateProgress(state, false);
   }
 
-  void RunPreprocessedUpdateChunk(const prechunk::Chunk& chunk,
-                                  EngineUpdateRunState* state,
-                                  const std::string& phase) {
-    InitEngineUpdateState(state, phase);
-    for (const auto& record : chunk.records) {
-      if (record.op_code == 6) {
-        ++state->stats.logical_rows;
-        LightNodeUpdate update;
-        const std::vector<std::string> fields =
-            prechunk::CopyFieldsToStd(record);
-        if (ResolvePreprocessedNodeUpdate(fields, &update, &state->stats)) {
-          ApplyNodeUpdate(state, std::move(update));
-        }
-      } else if (record.op_code == 7) {
-        ++state->stats.logical_rows;
-        LightEdgeUpdate update;
-        const std::vector<std::string> fields =
-            prechunk::CopyFieldsToStd(record);
-        if (ResolvePreprocessedEdgeUpdate(fields, &update, &state->stats)) {
-          ApplyEdgeUpdate(state, std::move(update));
-        }
-      }
-    }
-  }
-
   void RunPreparedPreprocessedUpdateChunk(
       const PreparedPreprocessedChunk& chunk,
       EngineUpdateRunState* state,
@@ -3848,16 +3630,6 @@ class FinBenchGraphDbTest {
       stats.checksum ^= HashMix(checksums[i] + i + 1);
     }
     return stats;
-  }
-
-  PreprocessedReadStats RunPreprocessedSingleNodeReadChunk(
-      const prechunk::Chunk& chunk) {
-    std::vector<std::vector<std::string>> records;
-    records.reserve(chunk.records.size());
-    for (const auto& record : chunk.records) {
-      records.push_back(prechunk::CopyFieldsToStd(record));
-    }
-    return RunPreparedSingleNodeReadChunk(records);
   }
 
   bool ReadPreprocessedSingleEdgeProperty(
@@ -4043,16 +3815,6 @@ class FinBenchGraphDbTest {
     return stats;
   }
 
-  PreprocessedReadStats RunPreprocessedSingleEdgeReadChunk(
-      const prechunk::Chunk& chunk) {
-    std::vector<std::vector<std::string>> records;
-    records.reserve(chunk.records.size());
-    for (const auto& record : chunk.records) {
-      records.push_back(prechunk::CopyFieldsToStd(record));
-    }
-    return RunPreparedSingleEdgeReadChunk(records);
-  }
-
   static void PrintPreprocessedReadStats(const char* phase,
                                          const PreprocessedReadStats& stats) {
     const double qps = stats.sec <= 0.0 ? 0.0
@@ -4083,25 +3845,6 @@ class FinBenchGraphDbTest {
                   << ": " << reasons[i].second << std::endl;
       }
     }
-  }
-
-  static void PrintPreprocessedMixedStats(const MixedWorkloadStats& stats) {
-    const uint64_t ops = stats.node_writes + stats.edge_writes +
-                         stats.query_ops;
-    const double qps = stats.total_sec <= 0.0 ? 0.0
-                                              : static_cast<double>(ops) /
-                                                    stats.total_sec;
-    std::cout << "[MIXED_WORKLOAD] time(s): " << stats.total_sec << std::endl;
-    std::cout << "[MIXED_WORKLOAD] ops: " << ops << std::endl;
-    std::cout << "[MIXED_WORKLOAD] qps(op/s): " << qps << std::endl;
-    std::cout << "[MIXED_WORKLOAD] node_writes: " << stats.node_writes
-              << std::endl;
-    std::cout << "[MIXED_WORKLOAD] edge_writes: " << stats.edge_writes
-              << std::endl;
-    std::cout << "[MIXED_WORKLOAD] query_ops: " << stats.query_ops
-              << std::endl;
-    std::cout << "[MIXED_WORKLOAD] query_checksum: " << stats.checksum
-              << std::endl;
   }
 
   int RunPreprocessed() {
@@ -4198,29 +3941,6 @@ class FinBenchGraphDbTest {
       bool started = false;
       Clock::time_point start{};
       Clock::time_point end{};
-
-      void BeginIfNeeded() {
-        if (!started) {
-          started = true;
-          start = Clock::now();
-          end = start;
-        }
-      }
-
-      void EndNow() {
-        if (started) {
-          end = Clock::now();
-        }
-      }
-
-      double Seconds() const {
-        if (!started) {
-          return 0.0;
-        }
-        return std::chrono::duration_cast<std::chrono::duration<double>>(end -
-                                                                         start)
-            .count();
-      }
     };
 	    StageWallClock active_stage_wall;
 	    prechunk::Stage active_stage = prechunk::Stage::kUnknown;
@@ -5204,9 +4924,6 @@ class FinBenchGraphDbTest {
 
   bool LoadAllDataset() {
     const auto t1 = std::chrono::steady_clock::now();
-    prepared_snapshot_node_batches_.clear();
-    prepared_snapshot_relation_batches_.clear();
-    prepared_incremental_batches_.clear();
     loaded_param_files_.clear();
     entity_to_vid_.clear();
     materialized_vertices_.clear();
@@ -5558,18 +5275,6 @@ class FinBenchGraphDbTest {
         scheduled_time};
   }
 
-  void PushPreparedNodeWrite(PreparedImportBatch* batch,
-                             PreparedNodeWrite write,
-                             bool mark_latency = true) {
-    if (batch == nullptr) {
-      return;
-    }
-    if (mark_latency) {
-      write.sample_write_latency = node_write_latency_sampler_.MarkNext();
-    }
-    batch->node_writes.push_back(std::move(write));
-  }
-
   void PushPreparedNodeWrite(PreparedImportBatch& batch,
                              PreparedNodeWrite write,
                              bool mark_latency = true) {
@@ -5773,15 +5478,6 @@ class FinBenchGraphDbTest {
 	              << std::endl;
 	  }
 
-  static uint64_t CountPreparedEntityNodes(
-      const std::vector<PreparedImportBatch>& batches) {
-    uint64_t total = 0;
-    for (const auto& batch : batches) {
-      total += batch.new_entity_nodes;
-    }
-    return total;
-  }
-
   void AppendSnapshotNodeRow(PreparedImportBatch* batch,
                              const NodeTableSpec& spec,
                              const CsvRow& row) {
@@ -5935,63 +5631,6 @@ class FinBenchGraphDbTest {
     batch->relation_writes.push_back(std::move(write));
   }
 
-  bool PrepareSnapshotNodeBatch(const NodeTableSpec& spec,
-                                const std::string& path) {
-    PreparedImportBatch batch;
-    batch.name = spec.file_name;
-    batch.node_writes.reserve(EstimateCsvRowsBySize(path, 192));
-    const bool ok = ForEachCsvRow(path, [&](const CsvRow& row) {
-      ++batch.logical_rows;
-      bool created = false;
-      const vertex_t id =
-          ResolveOrCreateEntityId(spec.kind, row.Get(spec.id_column), &created);
-      if (id == lsmgraph::INVALID_VERTEX_ID) {
-        std::cerr << "failed to allocate snapshot node id from " << spec.file_name
-                  << std::endl;
-        std::exit(1);
-      }
-	      PushPreparedNodeWrite(
-	          batch,
-	          BuildPreparedNodeWriteFromRow(id,
-	                                        spec.kind,
-	                                        row.Get(spec.id_column),
-	                                        row,
-	                                        spec.property_columns,
-	                                        ParseTimeToMillis(row.Get("createTime"))));
-      if (created) {
-        ++batch.new_entity_nodes;
-      }
-    });
-    if (!ok) {
-      return false;
-    }
-    prepared_snapshot_node_batches_.push_back(std::move(batch));
-    return true;
-  }
-
-  bool PrepareSnapshotRelationBatch(const RelationSpec& rel,
-                                    const std::string& path) {
-    PreparedImportBatch batch;
-    batch.name = rel.name;
-    const size_t row_hint = EstimateCsvRowsBySize(path, 1024);
-    batch.relation_writes.reserve(row_hint);
-    const bool ok = ForEachCsvRow(path, [&](const CsvRow& row) {
-      ++batch.logical_rows;
-      const vertex_t src =
-          RequireExistingEntityId(rel.src_kind, row.Get(rel.source_column), rel.name);
-      const vertex_t dst =
-          RequireExistingEntityId(rel.dst_kind, row.Get(rel.dest_column), rel.name);
-      PreparedRelationWrite write = BuildPreparedRelationWrite(rel, src, dst, row);
-      CollectSingleEdgeCandidates(rel, write, row);
-      batch.relation_writes.push_back(std::move(write));
-    });
-    if (!ok) {
-      return false;
-    }
-    prepared_snapshot_relation_batches_.push_back(std::move(batch));
-    return true;
-  }
-
 	  void AppendNodeWrite(PreparedImportBatch* batch,
 	                       vertex_t id,
 	                       NodeKind kind,
@@ -6030,278 +5669,6 @@ class FinBenchGraphDbTest {
 	    }
 	    return id;
 	  }
-
-  bool PrepareIncrementalNodeBatch(const std::string& name,
-                                   NodeKind kind,
-                                   const char* id_column,
-                                   const std::vector<std::string>& property_columns,
-                                   const std::string& path) {
-    PreparedImportBatch batch;
-    batch.name = name;
-    batch.node_writes.reserve(EstimateCsvRowsBySize(path, 192));
-	    const bool ok = ForEachCsvRow(path, [&](const CsvRow& row) {
-	      ++batch.logical_rows;
-	      const uint64_t scheduled_time = ParseTimeToMillis(row.Get("createTime"));
-	      bool created = false;
-	      const std::string& raw_id = row.Get(id_column);
-	      const vertex_t id = ResolveOrCreateEntityId(kind, raw_id, &created);
-	      PushPreparedNodeWrite(
-	          batch,
-	          BuildPreparedNodeWriteFromRow(id,
-	                                        kind,
-	                                        raw_id,
-	                                        row,
-	                                        property_columns,
-	                                        scheduled_time));
-      if (created) {
-        ++batch.new_entity_nodes;
-      }
-    });
-    if (!ok) {
-      return false;
-    }
-    prepared_incremental_batches_.push_back(std::move(batch));
-    return true;
-  }
-
-  bool PrepareIncrementalOwnAccountBatch(const std::string& name,
-                                         const RelationSpec& rel,
-                                         NodeKind owner_kind,
-                                         const char* owner_id_column,
-                                         const std::string& path) {
-    PreparedImportBatch batch;
-    batch.name = name;
-    const size_t row_hint = EstimateCsvRowsBySize(path, 1024);
-    batch.node_writes.reserve(row_hint * 2U);
-    batch.relation_writes.reserve(row_hint);
-	    const bool ok = ForEachCsvRow(path, [&](const CsvRow& row) {
-	      ++batch.logical_rows;
-	      const uint64_t scheduled_time = ParseTimeToMillis(row.Get("createTime"));
-	      const vertex_t owner =
-	          ResolveIncrementalEndpointId(
-	              &batch, owner_kind, row.Get(owner_id_column), name, scheduled_time);
-      bool account_created = false;
-      const std::string& account_raw_id = row.Get("accountId");
-      const vertex_t account =
-          ResolveOrCreateEntityId(NodeKind::kAccount, account_raw_id, &account_created);
-      std::vector<std::pair<std::string, std::string>> account_props = {
-          {"accountType", row.Get("accountType")},
-          {"isBlocked", row.Get("accountBlocked")},
-          {"nickname", row.Get("nickname")},
-          {"phonenum", row.Get("phonenum")},
-          {"email", row.Get("email")},
-          {"freqLoginType", row.Get("freqLoginType")},
-          {"lastLoginTime", row.Get("lastLoginTime")},
-          {"accountLevel", row.Get("accountLevel")},
-      };
-	      AppendNodeWrite(&batch,
-	                      account,
-	                      NodeKind::kAccount,
-	                      account_raw_id,
-	                      account_props,
-	                      account_created,
-	                      scheduled_time);
-      PreparedRelationWrite write =
-          BuildPreparedRelationWrite(rel, owner, account, row);
-      CollectSingleEdgeCandidates(rel, write, row);
-      batch.relation_writes.push_back(std::move(write));
-    });
-    if (!ok) {
-      return false;
-    }
-    prepared_incremental_batches_.push_back(std::move(batch));
-    return true;
-  }
-
-  bool PrepareIncrementalApplyLoanBatch(const std::string& name,
-                                        const RelationSpec& rel,
-                                        NodeKind applicant_kind,
-                                        const char* applicant_id_column,
-                                        const std::string& path) {
-    PreparedImportBatch batch;
-    batch.name = name;
-    const size_t row_hint = EstimateCsvRowsBySize(path, 1024);
-    batch.node_writes.reserve(row_hint * 2U);
-    batch.relation_writes.reserve(row_hint);
-	    const bool ok = ForEachCsvRow(path, [&](const CsvRow& row) {
-	      ++batch.logical_rows;
-	      const uint64_t scheduled_time = ParseTimeToMillis(row.Get("createTime"));
-	      const vertex_t applicant = ResolveIncrementalEndpointId(
-	          &batch, applicant_kind, row.Get(applicant_id_column), name, scheduled_time);
-      bool loan_created = false;
-      const std::string& loan_raw_id = row.Get("loanId");
-      const vertex_t loan =
-          ResolveOrCreateEntityId(NodeKind::kLoan, loan_raw_id, &loan_created);
-      std::vector<std::pair<std::string, std::string>> loan_props = {
-          {"loanAmount", row.Get("loanAmount")},
-          {"balance", row.Get("balance")},
-          {"loanUsage", row.Get("loanUsage")},
-          {"interestRate", row.Get("interestRate")},
-      };
-	      AppendNodeWrite(&batch,
-	                      loan,
-	                      NodeKind::kLoan,
-	                      loan_raw_id,
-	                      loan_props,
-	                      loan_created,
-	                      scheduled_time);
-      PreparedRelationWrite write =
-          BuildPreparedRelationWrite(rel, applicant, loan, row);
-      CollectSingleEdgeCandidates(rel, write, row);
-      batch.relation_writes.push_back(std::move(write));
-    });
-    if (!ok) {
-      return false;
-    }
-    prepared_incremental_batches_.push_back(std::move(batch));
-    return true;
-  }
-
-  bool PrepareSimpleRelationIncrementalBatch(const std::string& name,
-                                             const RelationSpec& rel,
-                                             const std::string& path,
-                                             const char* source_column = nullptr,
-                                             const char* dest_column = nullptr) {
-    PreparedImportBatch batch;
-    batch.name = name;
-    const size_t row_hint = EstimateCsvRowsBySize(path, 1024);
-    batch.node_writes.reserve(row_hint);
-    batch.relation_writes.reserve(row_hint);
-    const std::string src_col = source_column == nullptr ? rel.source_column : source_column;
-    const std::string dst_col = dest_column == nullptr ? rel.dest_column : dest_column;
-	    const bool ok = ForEachCsvRow(path, [&](const CsvRow& row) {
-	      ++batch.logical_rows;
-	      const uint64_t scheduled_time = ParseTimeToMillis(row.Get("createTime"));
-	      const vertex_t src =
-	          ResolveIncrementalEndpointId(
-	              &batch, rel.src_kind, row.Get(src_col), name, scheduled_time);
-	      const vertex_t dst =
-	          ResolveIncrementalEndpointId(
-	              &batch, rel.dst_kind, row.Get(dst_col), name, scheduled_time);
-      PreparedRelationWrite write = BuildPreparedRelationWrite(rel, src, dst, row);
-      CollectSingleEdgeCandidates(rel, write, row);
-      batch.relation_writes.push_back(std::move(write));
-    });
-    if (!ok) {
-      return false;
-    }
-    prepared_incremental_batches_.push_back(std::move(batch));
-    return true;
-  }
-
-  bool PrepareIncrementalBatch(const std::string& file_name,
-                               uint64_t op_num,
-                               const std::string& path) {
-    if (op_num == 17 || op_num == 18 || op_num == 19) {
-      return true;
-    }
-    if (file_name == "AddPersonWrite1.csv") {
-      return PrepareIncrementalNodeBatch(file_name,
-                                         NodeKind::kPerson,
-                                         "personId",
-                                         {"createTime", "personName", "isBlocked", "gender",
-                                          "birthday", "country", "city"},
-                                         path);
-    }
-    if (file_name == "AddCompanyWrite2.csv") {
-      return PrepareIncrementalNodeBatch(file_name,
-                                         NodeKind::kCompany,
-                                         "companyId",
-                                         {"createTime", "companyName", "isBlocked", "country",
-                                          "city", "business", "description", "url"},
-                                         path);
-    }
-    if (file_name == "AddMediumWrite3.csv") {
-      return PrepareIncrementalNodeBatch(file_name,
-                                         NodeKind::kMedium,
-                                         "mediumId",
-                                         {"createTime", "mediumType", "isBlocked",
-                                          "lastLoginTime", "riskLevel"},
-                                         path);
-    }
-    if (file_name == "AddPersonOwnAccountWrite4.csv") {
-      return PrepareIncrementalOwnAccountBatch(file_name,
-                                               MustGetRelation("PersonOwnAccount"),
-                                               NodeKind::kPerson,
-                                               "personId",
-                                               path);
-    }
-    if (file_name == "AddCompanyOwnAccountWrite5.csv") {
-      return PrepareIncrementalOwnAccountBatch(file_name,
-                                               MustGetRelation("CompanyOwnAccount"),
-                                               NodeKind::kCompany,
-                                               "companyId",
-                                               path);
-    }
-    if (file_name == "AddPersonApplyLoanWrite6.csv") {
-      return PrepareIncrementalApplyLoanBatch(file_name,
-                                              MustGetRelation("PersonApplyLoan"),
-                                              NodeKind::kPerson,
-                                              "personId",
-                                              path);
-    }
-    if (file_name == "AddCompanyApplyLoanWrite7.csv") {
-      return PrepareIncrementalApplyLoanBatch(file_name,
-                                              MustGetRelation("CompanyApplyLoan"),
-                                              NodeKind::kCompany,
-                                              "companyId",
-                                              path);
-    }
-    if (file_name == "AddPersonInvestCompanyWrite8.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("PersonInvestCompany"),
-                                                   path);
-    }
-    if (file_name == "AddCompanyInvestCompanyWrite9.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("CompanyInvestCompany"),
-                                                   path);
-    }
-    if (file_name == "AddPersonGuaranteePersonWrite10.csv" ||
-        file_name == "AddPersonGuaranteePersonReadWrite3.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("PersonGuaranteePerson"),
-                                                   path);
-    }
-    if (file_name == "AddCompanyGuaranteeCompanyWrite11.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("CompanyGuaranteeCompany"),
-                                                   path);
-    }
-    if (file_name == "AddAccountTransferAccountWrite12.csv" ||
-        file_name == "AddAccountTransferAccountReadWrite1.csv" ||
-        file_name == "AddAccountTransferAccountReadWrite2.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("AccountTransferAccount"),
-                                                   path);
-    }
-    if (file_name == "AddAccountWithdrawAccountWrite13.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("AccountWithdrawAccount"),
-                                                   path);
-    }
-    if (file_name == "AddAccountRepayLoanWrite14.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("AccountRepayLoan"),
-                                                   path,
-                                                   "account",
-                                                   nullptr);
-    }
-    if (file_name == "AddLoanDepositAccountWrite15.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("LoanDepositAccount"),
-                                                   path,
-                                                   "loanId",
-                                                   "accountId");
-    }
-    if (file_name == "AddMediumSigninAccountWrite16.csv") {
-      return PrepareSimpleRelationIncrementalBatch(file_name,
-                                                   MustGetRelation("MediumSignInAccount"),
-                                                   path);
-    }
-    std::cerr << "unknown incremental file: " << file_name << std::endl;
-    std::exit(1);
-  }
 
   void AppendIncrementalRowToBatch(const std::string& file_name,
                                    uint64_t op_num,
@@ -6494,13 +5861,6 @@ class FinBenchGraphDbTest {
 	    });
 	  }
 	
-	  void ExecutePreparedNodeWriteRefs(
-	      const std::vector<const PreparedNodeWrite*>& writes) {
-	    ParallelForWriteIndex(writes.size(), [&](size_t i) {
-	      ExecutePreparedNodeWriteOne(*writes[i]);
-	    });
-	  }
-	
 		  void ExecutePreparedRelationWriteOne(const PreparedRelationWrite& write) {
 	    std::chrono::steady_clock::time_point latency_t1;
 	    if (write.sample_write_latency) {
@@ -6588,13 +5948,6 @@ class FinBenchGraphDbTest {
 	    });
 	  }
 	
-	  void ExecutePreparedRelationWriteRefs(
-	      const std::vector<const PreparedRelationWrite*>& writes) {
-	    ParallelForWriteIndex(writes.size(), [&](size_t i) {
-	      ExecutePreparedRelationWriteOne(*writes[i]);
-	    });
-	  }
-
   static void AccumulatePreparedStats(const PreparedImportBatch& batch,
                                       ImportStats* stats) {
     if (stats == nullptr) {
@@ -7755,15 +7108,6 @@ class FinBenchGraphDbTest {
               << std::endl;
   }
 
-  static uint64_t FinBenchQueryFrequency(int query_id) {
-    static constexpr std::array<uint64_t, 13> kFreq = {
-        0, 26, 37, 106, 36, 72, 316, 48, 9, 384, 37, 20, 44};
-    if (query_id <= 0 || query_id >= static_cast<int>(kFreq.size())) {
-      return 1;
-    }
-    return kFreq[static_cast<size_t>(query_id)];
-  }
-
   const LoadedParamFile* FindLoadedParamFile(int query_id) const {
     for (const auto& item : loaded_param_files_) {
       if (item.query_id == query_id) {
@@ -7771,15 +7115,6 @@ class FinBenchGraphDbTest {
       }
     }
     return nullptr;
-  }
-
-  size_t EffectiveParamRows(const LoadedParamFile& file) const {
-    size_t row_count = file.data.rows.size();
-    if (FLAGS_finbench_param_limit_per_query > 0 &&
-        row_count > FLAGS_finbench_param_limit_per_query) {
-      row_count = FLAGS_finbench_param_limit_per_query;
-    }
-    return row_count;
   }
 
 	  void PrintMixedWorkloadStats(const MixedWorkloadStats& stats) const {
@@ -8410,9 +7745,6 @@ class FinBenchGraphDbTest {
   std::unordered_map<TypedEntityKey, vertex_t, TypedEntityKeyHash> entity_to_vid_;
   std::unordered_set<vertex_t> materialized_vertices_;
   std::mutex materialized_vertices_mu_;
-  std::vector<PreparedImportBatch> prepared_snapshot_node_batches_;
-  std::vector<PreparedImportBatch> prepared_snapshot_relation_batches_;
-  std::vector<PreparedImportBatch> prepared_incremental_batches_;
   std::vector<LoadedParamFile> loaded_param_files_;
   std::unordered_set<std::string> preprocessed_edge_slot_need_;
   std::unordered_map<std::string, uint16_t> preprocessed_edge_slot_;

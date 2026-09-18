@@ -144,9 +144,6 @@ DEFINE_uint32(snb_v1_memtable_num,
 DEFINE_uint32(snb_v1_memproperty_num,
               2,
               "Compatibility name for the engine property-buffer count.");
-DEFINE_bool(snb_v1_enable_memproperty,
-            false,
-            "Deprecated compatibility flag. GraphDb owns property buffering.");
 DEFINE_uint32(snb_v1_memtable_size,
               3050403,
               "Memtable size used by the underlying stores.");
@@ -198,10 +195,6 @@ DEFINE_uint64(snb_v1_write_latency_sample_seed,
               20260624,
               "Deterministic seed used to mark logical edge writes for latency "
               "sampling.");
-DEFINE_string(snb_v1_update_delta_dir,
-              "",
-              "Deprecated compatibility flag. Engine-owned deltas are stored "
-              "under each shard's property-delta directory.");
 DEFINE_uint64(snb_v1_update_node_memproperty_cap,
               1080000,
               "Compatibility input for the engine PropertyBuffer record cap.");
@@ -373,17 +366,6 @@ struct PreparedNodeWrite {
   bool has_node_cold_payload = false;
   bool sample_write_latency = false;
   uint64_t scheduled_time = 0;
-
-  explicit PreparedNodeWrite(
-      std::pmr::memory_resource* mr = std::pmr::get_default_resource())
-      : payload(mr), node_cold_payload(mr) {}
-
-  PreparedNodeWrite(vertex_t id_in,
-                    PmrString payload_in,
-                    uint64_t scheduled_time_in = 0)
-      : id(id_in),
-        payload(std::move(payload_in)),
-        scheduled_time(scheduled_time_in) {}
 
   PreparedNodeWrite(vertex_t id_in,
                     PmrString payload_in,
@@ -909,21 +891,6 @@ uint64_t ToUint64(const std::string& s) {
   }
 }
 
-int64_t ToInt64(const std::string& s) {
-  if (s.empty()) {
-    return 0;
-  }
-  try {
-    return static_cast<int64_t>(std::stoll(s));
-  } catch (...) {
-    return 0;
-  }
-}
-
-uint64_t ToUint64OrMax(const std::string& s) {
-  return s.empty() ? std::numeric_limits<uint64_t>::max() : ToUint64(s);
-}
-
 std::vector<std::string> SplitPipe(const std::string& line) {
   std::vector<std::string> out;
   size_t begin = 0;
@@ -958,24 +925,6 @@ uint64_t HashStrings(const std::vector<std::string>& values) {
             + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
   }
   return seed;
-}
-
-void HashRows(std::vector<std::vector<std::string>> rows,
-              QueryRunResult* out,
-              size_t limit = 0) {
-  if (out == nullptr) {
-    return;
-  }
-  std::sort(rows.begin(), rows.end());
-  if (limit > 0 && rows.size() > limit) {
-    rows.resize(limit);
-  }
-  out->rows = rows.size();
-  out->checksum = 0;
-  uint64_t row_no = 0;
-  for (const auto& row : rows) {
-    out->checksum ^= HashMix(HashStrings(row) + (++row_no));
-  }
 }
 
 void HashRowsInOrder(const std::vector<std::vector<std::string>>& rows,
@@ -1145,22 +1094,6 @@ std::vector<std::pair<std::string, std::string>> SplitPairList(
     }
   }
   return out;
-}
-
-uint64_t YearBucket(uint64_t year) {
-  if (year <= 1980) {
-    return 0;
-  }
-  if (year <= 1990) {
-    return 1;
-  }
-  if (year <= 2000) {
-    return 2;
-  }
-  if (year <= 2010) {
-    return 3;
-  }
-  return 4;
 }
 
 std::string NodeKindToString(NodeKind kind) {
@@ -1786,7 +1719,7 @@ void ParallelForIndexDynamicChunk(size_t count,
     return;
   }
 
-  const int omp_chunk =
+  [[maybe_unused]] const int omp_chunk =
       static_cast<int>(std::max<uint32_t>(1U, chunk_size));
 #pragma omp parallel for num_threads(static_cast<int>(thread_count)) schedule(dynamic, omp_chunk)
   for (long long i = 0; i < static_cast<long long>(count); ++i) {
@@ -2135,8 +2068,6 @@ class FixedResidentArena {
 
     uint64_t used_bytes() const { return used_; }
     uint64_t max_used_bytes() const { return max_used_; }
-    uint64_t size_bytes() const { return size_; }
-
    private:
     static uint64_t AlignUp(uint64_t value, uint64_t alignment) {
       if (alignment == 0) {
@@ -2355,9 +2286,6 @@ class SnbV1GraphDbTest {
     std::cout << "workload_sample_remainder: " << WorkloadSampleRemainder()
               << std::endl;
     std::cout << "system_threads: " << FLAGS_snb_v1_system_threads << std::endl;
-    std::cout << "legacy_memproperty_flag: "
-              << (FLAGS_snb_v1_enable_memproperty ? "true" : "false")
-              << std::endl;
     std::cout << "engine_property_updates: true" << std::endl;
     std::cout << "property_buffer_records: "
               << std::max(FLAGS_snb_v1_update_node_memproperty_cap,
@@ -2669,9 +2597,6 @@ class SnbV1GraphDbTest {
   }
 
   void ResetPreprocessedState() {
-    ReleaseVectorMemory(&prepared_initial_node_batches_);
-    ReleaseVectorMemory(&prepared_initial_relation_batches_);
-    ReleaseVectorMemory(&prepared_update_batches_);
     ReleaseVectorMemory(&loaded_node_tables_);
     ReleaseVectorMemory(&loaded_param_files_);
     entity_to_vid_ = {};
@@ -3147,80 +3072,6 @@ class SnbV1GraphDbTest {
     return stats;
   }
 
-  ImportStats ImportPreprocessedWriteChunk(
-      const prechunk::Chunk& chunk,
-      const prechunk::SchemaCatalog& catalog) {
-    ImportStats stats;
-    const bool sample_edges = chunk.stage == prechunk::Stage::kSnapshotEdges;
-    const bool old_sampling = write_latency_sampling_active_;
-    write_latency_sampling_active_ = sample_edges;
-    auto batch = NewPreparedBatch(chunk.path.filename().string(),
-                                  ImportBatchRows(),
-                                  ImportBatchRows());
-    for (const auto& record : chunk.records) {
-      const prechunk::SchemaInfo* schema = catalog.Find(record.schema_id);
-      if (schema == nullptr) {
-        continue;
-      }
-      if (record.op_code == 1 && schema->kind == "node") {
-        AppendPreprocessedNodeRecord(batch.get(), *schema, record);
-      } else if (record.op_code == 2 && schema->kind == "edge") {
-        AppendPreprocessedEdgeRecord(batch.get(), *schema, record);
-      } else {
-        continue;
-      }
-      if (batch->logical_rows >= ImportBatchRows() || LoadArenaNearFull()) {
-        FlushPreparedImportBatch(batch.get(), &stats);
-        ReleasePreparedBatch(&batch, "preprocessed_write");
-        batch = NewPreparedBatch(chunk.path.filename().string(),
-                                 ImportBatchRows(),
-                                 ImportBatchRows());
-      }
-    }
-    FlushPreparedImportBatch(batch.get(), &stats);
-    AddColdBlobFlushTime(&stats);
-    ReleasePreparedBatch(&batch, "preprocessed_write");
-    write_latency_sampling_active_ = old_sampling;
-    return stats;
-  }
-
-  MixedWorkloadStats RunPreprocessedMixedChunk(
-      const prechunk::Chunk& chunk,
-      const prechunk::SchemaCatalog& catalog) {
-    MixedWorkloadStats stats;
-    for (int qid = 1; qid <= 14; ++qid) {
-      stats.query_metrics[static_cast<size_t>(qid)].query_id = qid;
-    }
-    auto batch = NewPreparedBatch(chunk.path.filename().string(),
-                                  ImportBatchRows(),
-                                  ImportBatchRows());
-    for (const auto& record : chunk.records) {
-      const prechunk::SchemaInfo* schema = catalog.Find(record.schema_id);
-      if (schema == nullptr) {
-        continue;
-      }
-      if (record.op_code == 1 && schema->kind == "node") {
-        AppendPreprocessedNodeRecord(batch.get(), *schema, record);
-      } else if (record.op_code == 2 && schema->kind == "edge") {
-        AppendPreprocessedEdgeRecord(batch.get(), *schema, record);
-      }
-    }
-    PreprocessedQueryTaskStorage query_storage =
-        FLAGS_snb_v1_mix_enable_queries
-            ? BuildPreprocessedQueryTasks(chunk, catalog)
-            : PreprocessedQueryTaskStorage{};
-    ImportStats import_stats;
-    ExecuteMixedConcurrentBatch(
-        batch.get(), query_storage.tasks, &import_stats, &stats);
-    ReleasePreparedBatch(&batch, "preprocessed_mixed");
-    stats.logical_update_rows += import_stats.logical_rows;
-    stats.node_writes += import_stats.node_writes;
-    stats.edge_writes += import_stats.edge_writes;
-    stats.skipped_edges += import_stats.skipped_edges;
-    stats.write_sec += import_stats.sec;
-    return stats;
-  }
-
   static void AccumulateMixedStats(MixedWorkloadStats* total,
                                    const MixedWorkloadStats& delta) {
     total->logical_update_rows += delta.logical_update_rows;
@@ -3244,14 +3095,6 @@ class SnbV1GraphDbTest {
       dst.checksum ^= src.checksum;
       dst.sec += src.sec;
     }
-  }
-
-  PreprocessedQueryStats RunPreprocessedQueryChunk(
-      const prechunk::Chunk& chunk,
-      const prechunk::SchemaCatalog& catalog) {
-    PreprocessedQueryTaskStorage storage =
-        BuildPreprocessedQueryTasks(chunk, catalog);
-    return RunPreparedPreprocessedQueryTasks(storage);
   }
 
   PreprocessedQueryStats RunPreparedPreprocessedQueryTasks(
@@ -3394,16 +3237,6 @@ class SnbV1GraphDbTest {
       stats.checksum ^= HashMix(checksums[i] + i + 1);
     }
     return stats;
-  }
-
-  PreprocessedReadStats RunPreprocessedSingleNodeReadChunk(
-      const prechunk::Chunk& chunk) {
-    std::vector<std::vector<std::string>> records;
-    records.reserve(chunk.records.size());
-    for (const auto& record : chunk.records) {
-      records.push_back(prechunk::CopyFieldsToStd(record));
-    }
-    return RunPreparedSingleNodeReadChunk(records);
   }
 
   std::string PreprocessedImplicitNodeEdgeTarget(vertex_t src,
@@ -3696,16 +3529,6 @@ class SnbV1GraphDbTest {
     return stats;
   }
 
-  PreprocessedReadStats RunPreprocessedSingleEdgeReadChunk(
-      const prechunk::Chunk& chunk) {
-    std::vector<std::vector<std::string>> records;
-    records.reserve(chunk.records.size());
-    for (const auto& record : chunk.records) {
-      records.push_back(prechunk::CopyFieldsToStd(record));
-    }
-    return RunPreparedSingleEdgeReadChunk(records);
-  }
-
   static void PrintPreprocessedReadStats(const char* phase,
                                          const PreprocessedReadStats& stats) {
     const double qps = stats.sec <= 0.0 ? 0.0
@@ -3736,23 +3559,6 @@ class SnbV1GraphDbTest {
                   << ": " << reasons[i].second << std::endl;
       }
     }
-  }
-
-  static void PrintPreprocessedMixedStats(const MixedWorkloadStats& stats) {
-    const uint64_t ops = stats.node_writes + stats.edge_writes +
-                         stats.query_ops;
-    const double qps = stats.total_sec <= 0.0 ? 0.0
-                                              : static_cast<double>(ops) /
-                                                    stats.total_sec;
-    std::cout << "[MIXED_WORKLOAD] time(s): " << stats.total_sec << std::endl;
-    std::cout << "[MIXED_WORKLOAD] ops: " << ops << std::endl;
-    std::cout << "[MIXED_WORKLOAD] qps(op/s): " << qps << std::endl;
-    std::cout << "[MIXED_WORKLOAD] node_writes: " << stats.node_writes
-              << std::endl;
-    std::cout << "[MIXED_WORKLOAD] edge_writes: " << stats.edge_writes
-              << std::endl;
-    std::cout << "[MIXED_WORKLOAD] query_ops: " << stats.query_ops
-              << std::endl;
   }
 
   static uint32_t SnbNodeLogicalPropertyId(const std::string& name) {
@@ -4161,31 +3967,6 @@ class SnbV1GraphDbTest {
     PrintEngineUpdateProgress(state, false);
   }
 
-  void RunPreprocessedUpdateChunk(const prechunk::Chunk& chunk,
-                                  EngineUpdateRunState* state,
-                                  const std::string& phase) {
-    InitEngineUpdateState(state, phase);
-    for (const auto& record : chunk.records) {
-      if (record.op_code == 6) {
-        ++state->stats.logical_rows;
-        LightNodeUpdate update;
-        const std::vector<std::string> fields =
-            prechunk::CopyFieldsToStd(record);
-        if (ResolvePreprocessedNodeUpdate(fields, &update, &state->stats)) {
-          ApplyNodeUpdate(state, std::move(update));
-        }
-      } else if (record.op_code == 7) {
-        ++state->stats.logical_rows;
-        LightEdgeUpdate update;
-        const std::vector<std::string> fields =
-            prechunk::CopyFieldsToStd(record);
-        if (ResolvePreprocessedEdgeUpdate(fields, &update, &state->stats)) {
-          ApplyEdgeUpdate(state, std::move(update));
-        }
-      }
-    }
-  }
-
   void RunPreparedPreprocessedUpdateChunk(
       const PreparedPreprocessedChunk& chunk,
       EngineUpdateRunState* state,
@@ -4364,29 +4145,6 @@ class SnbV1GraphDbTest {
       bool started = false;
       Clock::time_point start{};
       Clock::time_point end{};
-
-      void BeginIfNeeded() {
-        if (!started) {
-          started = true;
-          start = Clock::now();
-          end = start;
-        }
-      }
-
-      void EndNow() {
-        if (started) {
-          end = Clock::now();
-        }
-      }
-
-      double Seconds() const {
-        if (!started) {
-          return 0.0;
-        }
-        return std::chrono::duration_cast<std::chrono::duration<double>>(end -
-                                                                         start)
-            .count();
-      }
     };
 	    StageWallClock active_stage_wall;
 	    prechunk::Stage active_stage = prechunk::Stage::kUnknown;
@@ -5097,9 +4855,6 @@ class SnbV1GraphDbTest {
 
   bool LoadAllDataset() {
     const auto t1 = std::chrono::steady_clock::now();
-    ReleaseVectorMemory(&prepared_initial_node_batches_);
-    ReleaseVectorMemory(&prepared_initial_relation_batches_);
-    ReleaseVectorMemory(&prepared_update_batches_);
     ReleaseVectorMemory(&loaded_node_tables_);
     ReleaseVectorMemory(&loaded_param_files_);
     entity_to_vid_ = {};
@@ -5296,56 +5051,6 @@ class SnbV1GraphDbTest {
     }
   }
 
-  void PrepareInitialNodeBatch(const NodeTableSpec& spec,
-                               const LoadedCsvFile& data) {
-    PreparedImportBatch batch;
-    batch.name = spec.file_name;
-    batch.logical_rows = static_cast<uint64_t>(data.rows.size());
-    batch.node_writes.reserve(data.rows.size());
-    for (const auto& row : data.rows) {
-      const vertex_t vid = AllocateVertexId(spec.kind, ToUint64(row.Get(spec.id_column)));
-      IndexNode(spec.kind, vid, row);
-      batch.node_writes.push_back(
-          BuildPreparedNodeWrite(vid, spec.kind, row, spec));
-    }
-    prepared_initial_node_batches_.push_back(std::move(batch));
-  }
-
-  bool PrepareInitialExplicitEdgeBatchFromFile(const EdgeTableSpec& spec,
-                                               const std::string& path) {
-    PreparedImportBatch batch;
-    batch.name = spec.file_name;
-    const size_t row_hint = FLAGS_snb_v1_import_row_limit_per_table > 0
-                                ? static_cast<size_t>(
-                                      FLAGS_snb_v1_import_row_limit_per_table)
-                                : EstimateCsvRowsBySize(path, 128);
-    if (row_hint > 0) {
-      batch.edge_writes.reserve(row_hint);
-    }
-    ImportStats prep_stats;
-    const bool ok =
-        ForEachCsvRow(path, FLAGS_snb_v1_import_row_limit_per_table,
-                      [&](const CsvRow& row) {
-                        ++batch.logical_rows;
-                        const std::string src_raw =
-                            EdgeEndpointValue(row, spec.src_column, spec.src_index);
-                        const std::string dst_raw =
-                            EdgeEndpointValue(row, spec.dst_column, spec.dst_index);
-                        QueueUpdateEdge(&batch.edge_writes,
-                                        &prep_stats,
-                                        LookupVertexId(spec.src_kind, src_raw),
-                                        LookupVertexId(spec.dst_kind, dst_raw),
-                                        spec.edge_type,
-                                        EdgePropsFromRow(row, spec.properties));
-                      });
-    if (!ok) {
-      return false;
-    }
-    batch.skipped_edges = prep_stats.skipped_edges;
-    prepared_initial_relation_batches_.push_back(std::move(batch));
-    return true;
-  }
-
   void AddImplicitEdgesForPreparedNodeRow(const NodeTableSpec& spec,
                                           const CsvRow& row,
                                           PreparedImportBatch* batch,
@@ -5416,89 +5121,6 @@ class SnbV1GraphDbTest {
                         comment, parent, kCommentParentComment, props);
       }
     }
-  }
-
-  void PrepareInitialImplicitEdgeBatch(const NodeTableSpec& spec,
-                                       const LoadedCsvFile& data) {
-    PreparedImportBatch batch;
-    batch.name = std::string(spec.file_name) + ":implicit";
-    batch.logical_rows = static_cast<uint64_t>(data.rows.size());
-    ImportStats prep_stats;
-    for (const auto& row : data.rows) {
-      AddImplicitEdgesForPreparedNodeRow(spec, row, &batch, &prep_stats);
-    }
-    batch.skipped_edges = prep_stats.skipped_edges;
-    prepared_initial_relation_batches_.push_back(std::move(batch));
-  }
-
-  bool PrepareUpdatePersonBatchFromFile(const std::string& name,
-                                        const std::string& path) {
-    std::ifstream in;
-    std::vector<char> buffer;
-    if (!OpenCsvInput(path, &in, &buffer)) {
-      std::cerr << "failed to load update stream: " << path << std::endl;
-      return false;
-    }
-
-    PreparedImportBatch batch;
-    batch.name = name;
-    ImportStats prep_stats;
-    uint64_t rows = 0;
-    std::string line;
-    while (std::getline(in, line)) {
-      if (line.empty()) {
-        continue;
-      }
-      const auto fields = SplitPipe(line);
-      ImportUpdatePersonRow(fields,
-                            &batch.node_writes,
-                            &batch.edge_writes,
-                            &prep_stats);
-      ++rows;
-      if (FLAGS_snb_v1_update_row_limit_per_file > 0 &&
-          rows >= FLAGS_snb_v1_update_row_limit_per_file) {
-        break;
-      }
-    }
-    batch.logical_rows = rows;
-    batch.skipped_edges = prep_stats.skipped_edges;
-    prepared_update_batches_.push_back(std::move(batch));
-    return true;
-  }
-
-  bool PrepareUpdateForumBatchFromFile(const std::string& name,
-                                       const std::string& path) {
-    std::ifstream in;
-    std::vector<char> buffer;
-    if (!OpenCsvInput(path, &in, &buffer)) {
-      std::cerr << "failed to load update stream: " << path << std::endl;
-      return false;
-    }
-
-    PreparedImportBatch batch;
-    batch.name = name;
-    ImportStats prep_stats;
-    uint64_t rows = 0;
-    std::string line;
-    while (std::getline(in, line)) {
-      if (line.empty()) {
-        continue;
-      }
-      const auto fields = SplitPipe(line);
-      ImportUpdateForumRow(fields,
-                           &batch.node_writes,
-                           &batch.edge_writes,
-                           &prep_stats);
-      ++rows;
-      if (FLAGS_snb_v1_update_row_limit_per_file > 0 &&
-          rows >= FLAGS_snb_v1_update_row_limit_per_file) {
-        break;
-      }
-    }
-    batch.logical_rows = rows;
-    batch.skipped_edges = prep_stats.skipped_edges;
-    prepared_update_batches_.push_back(std::move(batch));
-    return true;
   }
 
   void ExecutePreparedNodeWriteOne(const PreparedNodeWrite& write) {
@@ -5985,19 +5607,6 @@ class SnbV1GraphDbTest {
         });
   }
 
-  void SortIdMap(NodeKind kind) {
-    const size_t idx = KindIndex(kind);
-    auto& pairs = entity_to_vid_[idx];
-    std::sort(pairs.begin(), pairs.end(),
-              [](const IdPair& a, const IdPair& b) {
-                if (a.raw_id != b.raw_id) {
-                  return a.raw_id < b.raw_id;
-                }
-                return a.vid < b.vid;
-              });
-    id_maps_sorted_[idx] = true;
-  }
-
   void SortAllIdMaps() {
     for (size_t idx = 0; idx < entity_to_vid_.size(); ++idx) {
       auto& pairs = entity_to_vid_[idx];
@@ -6334,7 +5943,7 @@ class SnbV1GraphDbTest {
     if (!SingleEdgeReadEnabled()) {
       return;
     }
-    for (const std::string& name : {"creationDate", "joinDate", "workFrom"}) {
+    for (const std::string name : {"creationDate", "joinDate", "workFrom"}) {
       if (HasNonEmptyProperty(props, name)) {
         const uint16_t property_id = RegisterSingleEdgeProperty(name, false);
         AddSingleEdgeCandidateForStoredDirections(write, property_id, 0);
@@ -6641,14 +6250,6 @@ class SnbV1GraphDbTest {
       return row.GetByIndex(index);
     }
     return row.Get(column);
-  }
-
-  uint64_t CreationOf(std::optional<vertex_t> vid) const {
-    if (!vid.has_value()) {
-      return 0;
-    }
-    const size_t idx = static_cast<size_t>(*vid);
-    return idx < creation_by_vid_.size() ? creation_by_vid_[idx] : 0;
   }
 
   static bool ValidRef(const std::string& value) {
@@ -7147,14 +6748,6 @@ class SnbV1GraphDbTest {
     return it == kind_it->second.end() ? std::vector<vertex_t>{} : it->second;
   }
 
-  std::unordered_set<std::string> PlaceRawIdsByName(const std::string& name) {
-    std::unordered_set<std::string> out;
-    for (const auto vid : FindByName(NodeKind::kPlace, name)) {
-      out.insert(RawId(vid));
-    }
-    return out;
-  }
-
   std::unordered_set<std::string> TagClassRawIdsByName(const std::string& name) {
     std::unordered_set<std::string> out;
     for (const auto vid : FindByName(NodeKind::kTagClass, name)) {
@@ -7227,26 +6820,6 @@ class SnbV1GraphDbTest {
                    const std::string& name) const {
     const auto it = rec.properties.find(name);
     return it == rec.properties.end() ? 0 : ToUint64(it->second);
-  }
-
-  std::string EdgeString(const lsmgraph::GraphDbEdgeScanRecord& rec,
-                         const std::string& name) const {
-    const auto it = rec.properties.find(name);
-    return it == rec.properties.end() ? std::string() : it->second;
-  }
-
-  std::vector<lsmgraph::GraphDbEdgeScanRecord> FilteredKnows(vertex_t person) {
-    std::vector<lsmgraph::GraphDbEdgeScanRecord> out;
-    ForEachEdge(person,
-                kPersonKnowsPerson,
-                true,
-                "creationDate",
-                [&](vertex_t dst, const std::string& value) {
-                  out.push_back(MakeSinglePropRecord(dst, "creationDate", value));
-                  return FLAGS_snb_v1_frontier_limit == 0 ||
-                         out.size() < FLAGS_snb_v1_frontier_limit;
-                });
-    return out;
   }
 
   std::vector<lsmgraph::GraphDbEdgeScanRecord> MessagesByCreator(vertex_t person) {
@@ -7705,11 +7278,6 @@ class SnbV1GraphDbTest {
       return {};
     }
     return payload;
-  }
-
-  std::string StudyAtClassYear(
-      const lsmgraph::GraphDbEdgeScanRecord& study_edge) {
-    return FirstColdBlobField(EdgeString(study_edge, "cold_property"));
   }
 
   std::string PersonUniversities(vertex_t person) {
@@ -8861,56 +8429,6 @@ class SnbV1GraphDbTest {
 	    return nullptr;
 	  }
 
-	  size_t EffectiveParamRows(const LoadedCsvFile& loaded) const {
-	    size_t row_count = loaded.rows.size();
-	    if (FLAGS_snb_v1_param_limit_per_query > 0 &&
-	        row_count > FLAGS_snb_v1_param_limit_per_query) {
-	      row_count = FLAGS_snb_v1_param_limit_per_query;
-	    }
-	    return row_count;
-	  }
-
-	  static uint64_t SnbQueryFrequencyForScale(int query_id,
-	                                            std::string_view scale) {
-	    static constexpr std::array<uint64_t, 15> kSf01 = {
-	        0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-	    static constexpr std::array<uint64_t, 15> kSf30 = {
-	        0, 26, 37, 106, 36, 72, 316, 48, 9, 384, 37, 20, 44, 19, 49};
-	    static constexpr std::array<uint64_t, 15> kSf100 = {
-	        0, 26, 37, 123, 36, 78, 434, 38, 5, 527, 40, 22, 44, 19, 49};
-	    const std::array<uint64_t, 15>* freq = &kSf30;
-	    if (scale == "0.1") {
-	      freq = &kSf01;
-	    } else if (scale == "100") {
-	      freq = &kSf100;
-	    }
-	    if (query_id <= 0 || query_id >= static_cast<int>(freq->size())) {
-	      return 1;
-	    }
-	    return (*freq)[static_cast<size_t>(query_id)];
-	  }
-
-	  static uint64_t SnbDefaultUpdateInterleave(std::string_view scale) {
-	    if (scale == "0.1") {
-	      return 48607;
-	    }
-	    if (scale == "100") {
-	      return 48;
-	    }
-	    return 156;
-	  }
-
-	  std::string DatasetScale() const {
-	    const std::string path = FLAGS_snb_v1_dataset_root;
-	    if (path.find("sf0.1") != std::string::npos) {
-	      return "0.1";
-	    }
-	    if (path.find("sf100") != std::string::npos) {
-	      return "100";
-	    }
-	    return "30";
-	  }
-
 	  void PrintMixedWorkloadStats(const MixedWorkloadStats& stats) const {
 		    const uint64_t total_ops =
 		        stats.node_writes + stats.edge_writes + stats.query_ops;
@@ -9481,9 +8999,6 @@ class SnbV1GraphDbTest {
   std::vector<NodeKind> vid_to_kind_;
   std::vector<uint64_t> creation_by_vid_;
   HotNodeColumns hot_nodes_;
-  std::vector<PreparedImportBatch> prepared_initial_node_batches_;
-  std::vector<PreparedImportBatch> prepared_initial_relation_batches_;
-  std::vector<PreparedImportBatch> prepared_update_batches_;
   std::vector<LoadedNodeTable> loaded_node_tables_;
   std::vector<LoadedParamFile> loaded_param_files_;
   std::unordered_map<NodeKind,
