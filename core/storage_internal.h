@@ -31,9 +31,6 @@ const std::string& GetCurrentDbPath();
 std::string eFileName(uint64_t current_time);
 std::string pFileName(uint64_t current_time);
 std::string pFileName_with_id(const std::string& property_file, int id);
-std::string pLazyFileName_with_id(uint64_t current_time, int id);
-std::string pLazyFileName(uint64_t current_time);
-
 VertexId_t get_dst(const char* data);
 SequenceNumber_t get_seq(const char* data);
 Marker_t get_marker(const char* data);

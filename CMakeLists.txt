@@ -132,9 +132,6 @@ target_sources(LSMGraph
     src/storage_internal.cpp
     src/superversion.cpp
     src/MemTable.cpp
-    src/MemProperty.cpp
-    src/LazyUpdate.cpp
-    src/LazyFile.cpp
     src/graph_db.cpp
     src/options.cpp
     src/property_delta.cpp
@@ -148,7 +145,6 @@ target_sources(LSMGraph
     core/DataStructs.h
     core/lsmstore.h
     core/MemTable.h
-    core/MemProperty.h
     core/SSTable.h
     core/types.h
     core/config.h
@@ -160,8 +156,6 @@ target_sources(LSMGraph
     core/superversion.h
     core/neighbors.h
     core/edge_iterator_base.h
-    core/LazyUpdate.h
-    core/LazyFile.h
     core/graph_db.h
     core/cache/BlockManager.h
     core/cache/SSTDataCache.h

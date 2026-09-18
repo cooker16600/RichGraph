@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/LazyFile.h"
 #include "core/cache/SSTDataCache.h"
 #include "core/storage_internal.h"
 #include "core/flags.h"
@@ -19,19 +18,6 @@ typedef typename HashMap::const_accessor HashMapConstAccessor;
 typedef typename HashMap::accessor HashMapAccessor;
 typedef typename HashMap::iterator HashMapIterator;
 typedef HashMap::value_type HashMapValuePair;
-
-typedef tbb::concurrent_hash_map<FileId_t, LazyUpdate *> HashMapLazyUpdate;
-typedef
-    typename HashMapLazyUpdate::const_accessor HashMapLazyUpdateConstAccessor;
-typedef typename HashMapLazyUpdate::accessor HashMapLazyUpdateAccessor;
-typedef typename HashMapLazyUpdate::iterator HashMapLazyUpdateIterator;
-typedef HashMapLazyUpdate::value_type HashMapLazyUpdateValuePair;
-
-typedef tbb::concurrent_hash_map<FileId_t, LazyFile *> HashMapLazyFile;
-typedef typename HashMapLazyFile::const_accessor HashMapLazyFileConstAccessor;
-typedef typename HashMapLazyFile::accessor HashMapLazyFileAccessor;
-typedef typename HashMapLazyFile::iterator HashMapLazyFileIterator;
-typedef HashMapLazyFile::value_type HashMapLazyFileValuePair;
 
 class SSTDataManagerVector;
 class SSTDataManagerHash;
@@ -81,14 +67,6 @@ public:
     assert(rt == true);
   }
 
-  void put_LazyFile(const FileId_t fid, LazyFile *lf) {
-
-    HashMapLazyFileValuePair hashMapValuePairOfLazyFile(fid, lf);
-
-    bool rt = hashMapOfLazyFile.emplace(fid, lf);
-    assert(rt == true);
-  }
-
   SSTDataCache *get_data(const FileId_t fid) {
     HashMapConstAccessor hashAccessor;
     if (hashMap.find(hashAccessor, fid)) {
@@ -100,53 +78,11 @@ public:
     }
   }
 
-  LazyFile *get_LazyFile(FileId_t fid) {
-    HashMapLazyFileConstAccessor hashAccessor;
-    if (hashMapOfLazyFile.find(hashAccessor, fid)) {
-      return hashAccessor->second;
-    } else {
-      throw std::runtime_error("No found sstdatacache, fid=" +
-                               std::to_string(fid));
-      return nullptr;
-    }
-  }
-
-  LazyUpdate *get_lazyupdate(const FileId_t fid) {
-    HashMapLazyUpdateConstAccessor hashAccessor;
-    if (hashMapOfLazyUpdate.find(hashAccessor, fid)) {
-      return hashAccessor->second;
-    } else {
-      throw std::runtime_error("No found lazyupdate, fid=" +
-                               std::to_string(fid));
-      return nullptr;
-    }
-  }
-
-  std::vector<FileId_t> get_all_fid() {
-    std::vector<FileId_t> fids;
-    for (auto it = hashMapOfLazyUpdate.begin(); it != hashMapOfLazyUpdate.end();
-         it++) {
-      fids.push_back(it->first);
-    }
-    return fids;
-  }
-
   void del_data(const FileId_t fid) {
     HashMapConstAccessor hashAccessor;
     if (hashMap.find(hashAccessor, fid)) {
       delete hashAccessor->second;
       hashMap.erase(hashAccessor);
-    } else {
-      throw std::runtime_error("The deleted fid does not exist, fid=" +
-                               std::to_string(fid));
-    }
-  }
-
-  void del_LazyFile(FileId_t fid) {
-    HashMapLazyFileConstAccessor hashAccessor;
-    if (hashMapOfLazyFile.find(hashAccessor, fid)) {
-      delete hashAccessor->second;
-      hashMapOfLazyFile.erase(hashAccessor);
     } else {
       throw std::runtime_error("The deleted fid does not exist, fid=" +
                                std::to_string(fid));
@@ -182,12 +118,8 @@ public:
 
   HashMap GetHashMap() { return hashMap; }
 
-  HashMapLazyUpdate GetHashMapOfLazyUpdate() { return hashMapOfLazyUpdate; }
-
 private:
-  HashMap hashMap;                       // cache sstable data
-  HashMapLazyUpdate hashMapOfLazyUpdate; // cache lazyupdate
-  HashMapLazyFile hashMapOfLazyFile;     // cache lazyfile
+  HashMap hashMap;  // cache sstable data
 };
 
 } // namespace lsmgraph

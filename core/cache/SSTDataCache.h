@@ -11,7 +11,6 @@
 #include "core/storage_internal.h"
 #include "core/fixed_property_layout.h"
 #include "core/flags.h"
-#include "core/LazyUpdate.h"
 
 namespace lsmgraph
 {
@@ -183,7 +182,6 @@ namespace lsmgraph
 
     public:
       int sub_property_num_ = 0;
-      LazyUpdate* lazy_update_;
       SequenceNumber_t newest_edge = 0;
       size_t *property_size_ = nullptr;
       std::vector<char*>property_ptrs_;

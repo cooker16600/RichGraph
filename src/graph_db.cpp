@@ -782,14 +782,6 @@ Status GraphDb::OpenFromYaml(const std::string &base_dir,
   FLAGS_OPEN_SSTDATA_CACHE = options.cache_sst_data;
   FLAGS_richgraph_verbose = options.verbose_logging;
   FLAGS_mmap_path = options.mmap_path;
-  // The open-source API owns property buffering at GraphDb level.  Keep the
-  // historical LSMStore MemProperty path disabled so updates are never
-  // published through two independent mechanisms.
-  FLAGS_enable_memproperty = false;
-  FLAGS_memproperty_num = options.property_updates.buffer_count;
-  FLAGS_memproperty_size =
-      static_cast<uint32_t>(options.property_updates.buffer_capacity_records);
-
   auto db = std::unique_ptr<GraphDb>(new GraphDb());
   rs = db->Init(base_dir, schema, options, &err_msg);
   if (rs != Status::kOk) {
@@ -890,7 +882,6 @@ Status GraphDb::Init(const std::string &base_dir, const Schema &schema,
     handle.db = std::make_unique<LSMStore>(
         shard_dir, schema_.max_vertex_num, background_threads,
         static_cast<int>(options_.memtable_count),
-        static_cast<int>(options_.property_updates.buffer_count),
         handle.property_lengths, resolve_memtable_size(s.memtable_size),
         s.is_csr, s.csr_l0_max_sst_num, s.csr_l1_max_sst_num,
         PropertyObjectKind::kEdge, static_cast<uint32_t>(i),
@@ -920,7 +911,6 @@ Status GraphDb::Init(const std::string &base_dir, const Schema &schema,
   node_shard_.db = std::make_unique<LSMStore>(
       node_dir, schema_.max_vertex_num, background_threads,
       static_cast<int>(options_.memtable_count),
-      static_cast<int>(options_.property_updates.buffer_count),
       node_shard_.property_lengths,
       resolve_memtable_size(schema_.node_db.memtable_size),
       schema_.node_db.is_csr, schema_.node_db.csr_l0_max_sst_num,

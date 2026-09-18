@@ -73,9 +73,6 @@ private:
   livegraph::SparseArrayAllocator<void> array_allocator;
   FileId_t fid_;
   SequenceNumber_t start_time_;
-  std::map<FileId_t, bool>& sst_is_vaild_to_ins_lf_;
-  std::mutex* lf_mutex_;
-
  public:
   int64_t remain_capacity;
   std::atomic<SequenceNumber_t> newest_edge{0};
@@ -90,8 +87,6 @@ private:
            VersionSet* l0_versionset, Compaction& compactor, SuperVersion& sv,
            SSTDataManager& sstdata_manager, DelRecordManage& del_record_manager,
            std::atomic<SequenceNumber_t>& global_version_id,
-           std::map<FileId_t, bool>& sst_is_vaild_to_ins_lf,
-           std::mutex* lf_mutex,
            size_t _max_edge_num = FLAGS_memtable_size)
       : listLength(0),
         max_edge_num(_max_edge_num),
@@ -113,9 +108,7 @@ private:
 #if VERTEX_ADJ_TYPE == 1 || VERTEX_ADJ_TYPE == 2
         vertex_adjs(NULLPOINTER),
 #endif
-        refs(0),
-        sst_is_vaild_to_ins_lf_(sst_is_vaild_to_ins_lf),
-        lf_mutex_(lf_mutex) {
+        refs(0) {
 #if VERTEX_ADJ_TYPE == 0
     auto pointer_allocater = std::allocator_traits<
         decltype(array_allocator)>::rebind_alloc<uintptr_t>(array_allocator);
@@ -207,7 +200,6 @@ private:
     vertex_adjs[vid] = NULLPOINTER;
 #endif
   }
-  void change_sst_state(FileId_t sst_id, bool state);
 };
 } // namespace lsmgraph
 

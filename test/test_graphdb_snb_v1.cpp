@@ -4682,10 +4682,6 @@ class SnbV1GraphDbTest {
     FLAGS_OPEN_SSTDATA_CACHE = true;
     FLAGS_thread_num = FLAGS_snb_v1_system_threads;
     FLAGS_memtable_num = FLAGS_snb_v1_memtable_num;
-    // Keep the retired LSMStore MemProperty path off. The similarly named
-    // OpenDb configures the engine-owned PropertyUpdateManager explicitly.
-    FLAGS_enable_memproperty = false;
-    FLAGS_memproperty_num = 0;
     FLAGS_memtable_size = FLAGS_snb_v1_memtable_size;
     FLAGS_max_subcompactions = FLAGS_snb_v1_max_subcompactions;
     FLAGS_max_property_length = FLAGS_snb_v1_max_property_length;

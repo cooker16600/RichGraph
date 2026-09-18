@@ -386,8 +386,6 @@ public:
                   std::vector<std::mutex*>& tablecache_mutex,
                   VersionEdit& version_edit,
                   SSTDataManager& sstdata_manager,
-                  std::map<FileId_t, bool>& sst_is_vaild_to_ins_lf,
-                  std::mutex* lf_mutex,
                   bool can_be_rewrite = true):
                                     level_(level),
                                     fileMetaCache_(fileMetaCache),
@@ -402,8 +400,6 @@ public:
                                     tablecache_mutex_(tablecache_mutex),
                                     version_edit_(version_edit),
                                     sstdata_manager_(sstdata_manager),
-                                    sst_is_vaild_to_ins_lf_(sst_is_vaild_to_ins_lf),
-                                    lf_mutex_(lf_mutex),
                                     can_be_rewrite_(can_be_rewrite),
                                     property_num_(GetActiveSubPropertyNum()) {
 
@@ -518,18 +514,6 @@ public:
         return true;
     }
 
-    void change_sst_state(FileId_t sst_id, bool state){
-      std::lock_guard<std::mutex> lock(*lf_mutex_);
-      if(state){
-        sst_is_vaild_to_ins_lf_.insert({sst_id, true});
-      } else {
-        auto it = sst_is_vaild_to_ins_lf_.find(sst_id);
-        if(it != sst_is_vaild_to_ins_lf_.end()){
-          sst_is_vaild_to_ins_lf_.erase(it);
-        }
-      }
-    }
-
     void WriteEnd() {
         assert(edge_ptr_ + 1 < BODY_BUFFER_SIZE);
         EdgePropertyOffset_t *Offset; 
@@ -587,10 +571,6 @@ public:
   
         sstdata_manager_.put_data(timestamp_, temp_filemeta_cache->header.size,
                               reinterpret_cast<uintptr_t>(temp_filemeta_cache), newest_edge);
-        if(can_be_rewrite_){
-          change_sst_state(timestamp_, true);
-        }
-
         // Legacy non-multiversion indexes are mutated in place and therefore
         // require synchronization with concurrent readers.
         if (FLAGS_support_mulversion== false) {
@@ -1144,9 +1124,6 @@ private:
 
     SSTDataManager& sstdata_manager_;
 
-    std::map<FileId_t, bool>& sst_is_vaild_to_ins_lf_;
-    std::mutex* lf_mutex_;
-
     bool can_be_rewrite_;
     int property_num_;
 
@@ -1177,8 +1154,6 @@ public:
 	             SSTDataManager& sstdata_manager,
              DelRecordManage& del_record_manager,
              SuperVersion& sv,
-             std::mutex* lf_mutex,
-             std::map<FileId_t, bool>& sst_is_vaild_to_ins_lf,
              const std::vector<uint32_t>& sub_property_lengths)
                       : state(false),
                       fileMetaCache_(_fileMetaCache), 
@@ -1195,9 +1170,7 @@ public:
                                      1, BODY_BUFFER_SIZE,     // edgeBodyBuffer_
                                      sub_property_lengths_.size(), PROPERTY_BUFFER_SIZE), // propertyBuffer_
                       large_job_(0),
-                      max_job_num_(0),
-                      lf_mutex_(lf_mutex),
-                      sst_is_vaild_to_ins_lf_(sst_is_vaild_to_ins_lf){
+                      max_job_num_(0) {
     for (int level = 0; level < MAX_LEVEL; level++) {
       compact_pointer_[level] = MAX_GLOBAL_SEQ;
     }
@@ -1360,12 +1333,6 @@ public:
                               std::vector<EdgeRecord>& edge_cache,
                               std::vector<Way>& ways);
   
-  void MergeLazyFileBeforeCompaction();
-
-  void Merge_Lazy_file(LazyUpdate* lazyupdate, int sub_property_id);
-  void Merge_Lazy_file_of_SST(int level, SSTableCache* sstable, std::vector<SSTableCache*>&new_inputs, bool need_delete_file);
-  void Do_Merge_Work_Before_Compaction(int level, bool need_delete_file);
-  void change_sst_state(FileId_t sst_id, bool state);
   void clean();
 private:
   RWLock_t& VertexRWLock(VertexId_t vid) {
@@ -1428,12 +1395,7 @@ private:
   uint32_t l0_auto_compaction_limit_ = 4;
   uint32_t l1_auto_compaction_limit_ = 0;
 
-  std::map<FileId_t, bool>& sst_is_vaild_to_ins_lf_;
-  std::mutex* lf_mutex_;
-
   PreparationCallback preparation_callback_;
-
-  std::map<std::pair<FileId_t, int>, std::vector<LazyFile*>>lf_need_del;
 
 #ifdef WRITE_STALL_TEST
   std::vector<std::pair<uint32_t, double>> timings;

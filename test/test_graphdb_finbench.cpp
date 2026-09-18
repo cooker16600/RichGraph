@@ -4502,10 +4502,6 @@ class FinBenchGraphDbTest {
     FLAGS_OPEN_SSTDATA_CACHE = true;
     FLAGS_thread_num = FLAGS_finbench_system_threads;
     FLAGS_memtable_num = FLAGS_finbench_memtable_num;
-    // Keep the retired LSMStore MemProperty path off. The similarly named
-    // OpenDb configures the engine-owned PropertyUpdateManager explicitly.
-    FLAGS_enable_memproperty = false;
-    FLAGS_memproperty_num = 0;
     FLAGS_memtable_size = FLAGS_finbench_memtable_size;
     FLAGS_max_property_length = FLAGS_finbench_property_length;
     FLAGS_max_subcompactions = FLAGS_finbench_max_subcompactions;

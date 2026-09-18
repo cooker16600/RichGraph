@@ -77,20 +77,10 @@ public:
                                        bool is_out = true,
                                        uint8_t edge_type = 0) = 0;
 
-  virtual Status find_edge_in_memproperty(VertexId_t src, VertexId_t dst,
-                                          std::string *property,
-                                          int property_id, bool is_out = true,
-                                          uint8_t edge_type = 0) = 0;
-
   virtual Status find_edge_in_SStableCache(VertexId_t src, VertexId_t dst,
                                            std::string *property,
                                            int property_id, bool is_out = true,
                                            uint8_t edge_type = 0) = 0;
-
-  virtual Status find_edge_in_LazyFile(VertexId_t src, VertexId_t dst,
-                                       std::string *property, int property_id,
-                                       LazyUpdate *lu, bool is_out = true,
-                                       uint8_t edge_type = 0) = 0;
 
   virtual Status find_edge_in_lonely_SStableCache(
       VertexId_t src, VertexId_t dst, std::string *property, int property_id,
@@ -157,9 +147,6 @@ public:
 
   virtual void clean() = 0;
 
-  virtual void Merge_Lazy_files_to_1() = 0;
-
-  // virtual void Merge_Lazy_file(LazyUpdate *lazyupdate, int sub_property_id) =
 };
 
 } // namespace lsmgraph

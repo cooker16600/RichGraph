@@ -197,13 +197,6 @@ inline EdgeLookupResult FindEdgeByDstDirectionAndType(const char* body_buffer,
   return result;
 }
 
-inline uint32_t EncodeLazyMarkerDirectionAndType(bool marker, bool is_out,
-                                                 uint8_t edge_type) {
-  return (static_cast<uint32_t>(marker) << 31)
-       | (static_cast<uint32_t>(is_out) << 30)
-       | (static_cast<uint32_t>(edge_type) << 22);
-}
-
 struct CSRSelectedEdgeRef {
   lsmgraph::VertexId_t dst = 0;
   lsmgraph::SequenceNumber_t seq = 0;
@@ -266,7 +259,7 @@ LSMStore::FindCSRIndexEntry(const CSRReadSnapshot* snapshot,
 }
 
 LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
-                   int thread_num, int memtable_num, int memproperty_num,
+                   int thread_num, int memtable_num,
                    std::vector<uint32_t> sub_property_lengths,
                    size_t memtable_size,
                    bool is_csr,
@@ -297,8 +290,6 @@ LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
                                 sstdata_manager_,
                                 del_record_manager_,
                                 sv_,
-                                &lf_mutex,
-                                sst_is_vaild_to_ins_lf,
                                 sub_property_lengths_),
                      use_csr_disk_(FLAGS_use_csr_disk),
                      is_csr_(is_csr),
@@ -322,7 +313,6 @@ LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
     const ScopedDbPathOverride db_path_override(&dataDir);
     currentTime = 0;
     global_seq.store(0, std::memory_order_relaxed);
-    memProperty_.store(nullptr, std::memory_order_relaxed);
 
     if (FLAGS_LOAD_OLD_DATA == false) {
       if (FLAGS_richgraph_verbose) {
@@ -440,8 +430,6 @@ LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
                                     compactor_, sv_, sstdata_manager_,
                                     del_record_manager_,
                                     global_version_id_,
-                                    sst_is_vaild_to_ins_lf,
-                                    &lf_mutex,
                                     memtable_size_);
       memTable_list_.emplace_back(tb);
       free_menTables.push(tb);
@@ -453,49 +441,18 @@ LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
     mem->SetStartTime(
       automic_get_global_seq(mem->GetMaxEdgeNum()));
     
-    // init memproperty
-    MemProperty* pp = nullptr;
-    if (FLAGS_enable_memproperty && memproperty_num > 0) {
-      memProperty_list_.reserve(memproperty_num);
-      for(int i = 0; i < memproperty_num; ++i) {
-        MemProperty* new_pp = new MemProperty(level_0_mux_, max_vertex_num, vertex_id_,
-                                      vertex_futexes_,
-                                      vertex_lock_count_,
-                                      vertex_max_level_,
-                                      l0_versionset_,
-                                      sv_, sstdata_manager_,
-                                      del_record_manager_,
-                                      global_version_id_);
-        memProperty_list_.emplace_back(new_pp);
-        free_memProperties.push(new_pp);
-      }
-      pp = get_newmemProperty();
-      memProperty_.store(pp, std::memory_order_release);
-      pp->SetLive(true);
-      pp->SetFid(__sync_fetch_and_add(&currentTime, 1));
-      pp->SetStartTime(
-        automic_get_global_seq(pp->GetMaxEdgeNum()));
-    } else {
-      if (FLAGS_richgraph_verbose) {
-        std::cout << " memproperty disabled." << std::endl;
-      }
-    }
-
     // init superversion
     l0_versionset_->VersionLock();
-    std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms
-        = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
+    std::shared_ptr<VersionAndMemTable> new_vms
+        = std::make_shared<VersionAndMemTable>();
     new_vms->set_vs(l0_versionset_->GetCurrent());
     new_vms->insert_tb(mem);
-    if (pp != nullptr) {
-      new_vms->insert_pp(pp);
-    }
     #ifndef VM_RW_LOCK
     std::atomic_store(&sv_.version_memtable, new_vm);
     #else
     {
       std::unique_lock w_lock(sv_.vm_rw_mtx);
-      sv_.version_memtable_memproperty_lazyfile = new_vms;
+      sv_.version_memtable = new_vms;
     }
     #endif
     global_version_id_.fetch_add(1, std::memory_order_acquire);
@@ -657,10 +614,6 @@ LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
       // recovered identifiers before publishing any new write.
       mem->SetFid(__sync_fetch_and_add(&currentTime, 1));
       mem->SetStartTime(automic_get_global_seq(mem->GetMaxEdgeNum()));
-      if (pp != nullptr) {
-        pp->SetFid(__sync_fetch_and_add(&currentTime, 1));
-        pp->SetStartTime(automic_get_global_seq(pp->GetMaxEdgeNum()));
-      }
       if (FLAGS_richgraph_verbose) {
         std::cout << "finish load head and index of each SSTableCache"
                   << std::endl;
@@ -682,20 +635,18 @@ LSMStore::LSMStore(const std::string &dir, const size_t max_vertex_num,
         fileMetaCache[0] =
             l0_versionset_->GetCurrent()->GetLevel0Files();
 
-        std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_view;
+        std::shared_ptr<VersionAndMemTable> old_view;
         {
           std::shared_lock lock(sv_.vm_rw_mtx);
-          old_view = sv_.version_memtable_memproperty_lazyfile;
+          old_view = sv_.version_memtable;
         }
         auto new_view =
-            std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
+            std::make_shared<VersionAndMemTable>();
         new_view->batch_insert_tb(old_view->menTables);
-        new_view->batch_insert_pp(old_view->memProperties);
-        new_view->batch_insert_lf(&old_view->sst_has_lf);
         new_view->set_vs(l0_versionset_->GetCurrent());
         {
           std::unique_lock lock(sv_.vm_rw_mtx);
-          sv_.version_memtable_memproperty_lazyfile = std::move(new_view);
+          sv_.version_memtable = std::move(new_view);
         }
         global_version_id_.fetch_add(1, std::memory_order_release);
         l0_versionset_->VersionUnLock();
@@ -1249,17 +1200,17 @@ void LSMStore::RebuildCSRFromVisibleSSTs() {
   {
     SuperVersion snapshot;
     get_superversion(snapshot);
-    if (snapshot.version_memtable_memproperty_lazyfile != nullptr &&
-        snapshot.version_memtable_memproperty_lazyfile->current_ != nullptr) {
+    if (snapshot.version_memtable != nullptr &&
+        snapshot.version_memtable->current_ != nullptr) {
       auto* level0 =
-          snapshot.version_memtable_memproperty_lazyfile->current_->GetLevel0Files();
+          snapshot.version_memtable->current_->GetLevel0Files();
       if (level0 != nullptr) {
         for (auto* cache : *level0) {
           add_source_file(cache);
         }
       }
     }
-    snapshot.version_memtable_memproperty_lazyfile = nullptr;
+    snapshot.version_memtable = nullptr;
   }
 
   // 兼容“启动时加载旧数据”的场景：将 level>=1 的文件也纳入重建输入。
@@ -1712,7 +1663,7 @@ Status LSMStore::find_edge_in_csr_disk(VertexId_t src, VertexId_t dst,
   // 复用现有的 SST 查询实现，保持与 LSM 路径一致：
   // 1) 方向/类型过滤；
   // 2) 定长属性读取；
-  // 3) lazy file 覆盖语义。
+  // 3) property-delta 覆盖语义。
   if (FLAGS_support_mulversion == true) {
     get_superversion(local_sv_);
   }
@@ -1720,7 +1671,7 @@ Status LSMStore::find_edge_in_csr_disk(VertexId_t src, VertexId_t dst,
                                            fid, property, property_id,
                                            is_out, edge_type);
   if (FLAGS_support_mulversion == true) {
-    local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+    local_sv_.version_memtable = nullptr;
   }
   return rs;
 }
@@ -1987,14 +1938,6 @@ LSMStore::~LSMStore() {
     }
     }
 
-    MemProperty* pp_ = memProperty_.load(std::memory_order_relaxed);
-    if(pp_ != nullptr && pp_->GetListLength() > 0) {
-      if (FLAGS_richgraph_verbose) {
-        std::cout << " save memproperty data before close db." << std::endl;
-      }
-      save_memproperty_to_SST(pp_);
-    }
-
     MemTable* mem_ = memTable_.load(std::memory_order_relaxed);
     if(mem_->GetListLength() > 0) {
       if (FLAGS_richgraph_verbose) {
@@ -2118,7 +2061,7 @@ LSMStore::~LSMStore() {
 
     {
       std::unique_lock lock(sv_.vm_rw_mtx);
-      sv_.version_memtable_memproperty_lazyfile.reset();
+      sv_.version_memtable.reset();
     }
     delete l0_versionset_;
     l0_versionset_ = nullptr;
@@ -2152,11 +2095,6 @@ LSMStore::~LSMStore() {
       delete tb;
     }
     memTable_list_.clear();
-
-    for (auto* property : memProperty_list_) {
-      delete property;
-    }
-    memProperty_list_.clear();
 
     // clear file handle
     for (auto& f_handle : file_handle_cache_) {
@@ -2334,17 +2272,15 @@ void LSMStore::put_edge(VertexId_t src, VertexId_t dst,
   std::shared_ptr<VersionAndMemTable>
                   old_vm = std::atomic_load(&sv_.version_memtable);
   #else
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
+  std::shared_ptr<VersionAndMemTable> old_vms;
   {
     std::shared_lock r_lock(sv_.vm_rw_mtx);
-    old_vms = sv_.version_memtable_memproperty_lazyfile;
+    old_vms = sv_.version_memtable;
   }
   #endif
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms
-      = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
+  std::shared_ptr<VersionAndMemTable> new_vms
+      = std::make_shared<VersionAndMemTable>();
   new_vms->batch_insert_tb(old_vms->menTables);
-  new_vms->batch_insert_pp(old_vms->memProperties);
-  new_vms->batch_insert_lf(&old_vms->sst_has_lf);
   new_vms->set_vs(old_vms->current_);
   new_vms->insert_tb(null_memtable);
   #ifndef VM_RW_LOCK
@@ -2352,7 +2288,7 @@ void LSMStore::put_edge(VertexId_t src, VertexId_t dst,
   #else
   {
     std::unique_lock w_lock(sv_.vm_rw_mtx);
-    sv_.version_memtable_memproperty_lazyfile = new_vms;
+    sv_.version_memtable = new_vms;
   }
   #endif
   global_version_id_.fetch_add(1, std::memory_order_acquire);
@@ -2404,104 +2340,11 @@ void LSMStore::put_edge(VertexId_t src, VertexId_t dst,
 void LSMStore::update_edge(VertexId_t src, VertexId_t dis, const EdgeProperty_t &s,
                            Marker_t mk, SequenceNumber_t sq, bool is_out,
                            uint8_t edge_type){
-
-
-  Marker_t marker = false;
-
-  if (!FLAGS_enable_memproperty) {
-    if (mk) {
-      put_edge(src, dis, "~DELETED~", EdgeInsertMode::kSingle,
-               is_out, edge_type, sq);
-    } else {
-      put_edge(src, dis, s, EdgeInsertMode::kSingle, is_out, edge_type, sq);
-    }
-    return;
-  }
-
-
-
-
-  int64_t remain_capacity = 0;
-  MemProperty* old_mpp = memProperty_.load(std::memory_order_acquire);
-  remain_capacity = __sync_fetch_and_sub(&old_mpp->remain_capacity, 1);
-  auto timeout = std::chrono::milliseconds(10);
-  int cnt = 0;
-  while(remain_capacity <= 0) {
-    cnt++;
-    std::cout<<"rem:"<<remain_capacity<<"request times:"<<cnt<<"阻塞！\n";
-    std::unique_lock<std::mutex> locker(memproperty_insert_mux_);
-    old_mpp = memProperty_.load(std::memory_order_acquire);
-    remain_capacity = __sync_fetch_and_sub(&old_mpp->remain_capacity, 1);
-    if(remain_capacity > 0){
-      break;
-    }
-    memproperty_cv_.wait_for(locker, timeout);
-    old_mpp = memProperty_.load(std::memory_order_acquire);
-    remain_capacity = __sync_fetch_and_sub(&old_mpp->remain_capacity, 1);
-  }
-  assert(remain_capacity > 0);
-  size_t id = old_mpp->GetMaxEdgeNum() - remain_capacity;
-  SequenceNumber_t seq = old_mpp->GetStartTime() + id;
-
-  if(sq != -1){
-    marker = mk;
-    seq = sq;
-  }
-
-  // update edge
-  old_mpp->update_edge(src, dis, s, marker, seq, id, is_out, edge_type);    //EdgeProperty_t &s
-
-  if(remain_capacity > 1) {
-    return ;
-  }
-  // Rotate a full property buffer and flush the immutable one.
-  MemProperty * null_memproperty = get_newmemProperty();
-  
-  null_memproperty->SetStartTime(automic_get_global_seq(null_memproperty->GetMaxEdgeNum()));
-  null_memproperty->SetLive(true);
-  null_memproperty->SetFid(__sync_fetch_and_add(&currentTime, 1));
-  memProperty_.store(null_memproperty, std::memory_order_release);
-
-  memproperty_cv_.notify_all();
-  l0_versionset_->VersionLock();
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
-  {
-    std::shared_lock r_lock(sv_.vm_rw_mtx);
-    old_vms = sv_.version_memtable_memproperty_lazyfile;
-  }
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms
-      = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
-  new_vms->batch_insert_tb(old_vms->menTables);
-  new_vms->batch_insert_pp(old_vms->memProperties);
-  new_vms->batch_insert_lf(&old_vms->sst_has_lf);
-  new_vms->set_vs(old_vms->current_);
-  new_vms->insert_pp(null_memproperty);
-  {
-    std::unique_lock w_lock(sv_.vm_rw_mtx);
-    sv_.version_memtable_memproperty_lazyfile = new_vms;
-  }
-  global_version_id_.fetch_add(1, std::memory_order_acquire);
-  l0_versionset_->VersionUnLock();
-
-	  bool open_extra_compression_thread = true;
-	  if(open_extra_compression_thread) {
-	    BeginBackgroundFlushJob();
-	    auto save = [this] (MemProperty* immemProperty) {
-	      struct BackgroundJobGuard {
-	        LSMStore* store;
-	        ~BackgroundJobGuard() { store->MarkBackgroundFlushJobDone(); }
-	      } background_guard{this};
-	      const ScopedFixedPropertyLayout property_layout(&sub_property_lengths_);
-	      const ScopedDbPathOverride db_path_override(&dataDir);
-      std::cout<<"begin save memproperty!\n";
-      save_memproperty_to_SST(immemProperty);
-      recycle_memProperty(immemProperty);
-      std::cout<<"finish save memproperty!\n";
-    };
-    worker_pool.enqueue(save, old_mpp);
-    std::cout<<"insert a task!\n";
-  }
-  else{
+  if (mk) {
+    put_edge(src, dis, "~DELETED~", EdgeInsertMode::kSingle,
+             is_out, edge_type, sq);
+  } else {
+    put_edge(src, dis, s, EdgeInsertMode::kSingle, is_out, edge_type, sq);
   }
 }
 
@@ -2596,7 +2439,7 @@ Status LSMStore::find_edge_in_memtable(VertexId_t src, VertexId_t dst,
     get_superversion(local_sv_);
     
     Status rs = Status::kNotFound;
-    for(auto tb : local_sv_.version_memtable_memproperty_lazyfile->menTables) {
+    for(auto tb : local_sv_.version_memtable->menTables) {
       FileId_t fid = INVALID_File_ID;
       SequenceNumber_t base_sequence = MAX_SEQ_ID;
       rs = tb->get(src, dst, is_out, edge_type, fid, base_sequence);
@@ -2611,7 +2454,7 @@ Status LSMStore::find_edge_in_memtable(VertexId_t src, VertexId_t dst,
                            edge_type,
                            kLatestPropertyCommit,
                            property)) {
-            local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+            local_sv_.version_memtable = nullptr;
             return Status::kOk;
           }
           std::string payload;
@@ -2621,58 +2464,13 @@ Status LSMStore::find_edge_in_memtable(VertexId_t src, VertexId_t dst,
             *property = ExtractSubProperty(payload, property_id);
           }
         }
-        local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+        local_sv_.version_memtable = nullptr;
         return rs;
       }
 
     }
     return rs;
   }
-
-Status LSMStore::find_edge_in_memproperty(VertexId_t src, VertexId_t dst,
-    std::string* property, int property_id, bool is_out, uint8_t edge_type){
-      if (!FLAGS_enable_memproperty) {
-        return Status::kNotFound;
-      }
-      get_superversion(local_sv_);
-
-      Status rs = Status::kNotFound;
-      if (local_sv_.version_memtable_memproperty_lazyfile == nullptr) {
-        return rs;
-      }
-      for(auto pp : local_sv_.version_memtable_memproperty_lazyfile->memProperties) {
-        if (pp == nullptr) {
-          continue;
-        }
-        rs = pp->get_property(src, dst, is_out, edge_type, property);
-        if(rs!= Status::kNotFound) {
-          assert(property_id < GetActiveSubPropertyNum());
-          string ans = "";
-          int cnt = 0;
-          for(auto c:*property){
-            if(c == '|'){
-              cnt++;
-              continue;
-            }
-            if(cnt == property_id){
-              ans += c;
-            }
-            if(cnt > property_id)break;
-          }
-          *property = ans;
-          local_sv_.version_memtable_memproperty_lazyfile = nullptr;
-          if(*property == "~INPLACED~"){
-            rs = Status::kDelete;
-          }
-          if(*property == ""){
-            rs = Status::kNotFound;
-          }
-          return rs;
-        }
-      }
-      local_sv_.version_memtable_memproperty_lazyfile = nullptr;
-      return rs;
-    }
 
 Status LSMStore::find_edge_in_SStableCache(VertexId_t src, VertexId_t dst,
     std::string* property, int property_id, bool is_out, uint8_t edge_type){
@@ -2686,7 +2484,7 @@ Status LSMStore::find_edge_in_SStableCache(VertexId_t src, VertexId_t dst,
         
         FileId_t min_level_0_fid = local_sv_.findex.get_min_level_0_fid();
         bool found = false;
-        for (auto it : *(local_sv_.version_memtable_memproperty_lazyfile->current_->GetLevel0Files())) {
+        for (auto it : *(local_sv_.version_memtable->current_->GetLevel0Files())) {
           if (it->header.timeStamp >= 0
               && src <= it->header.maxKey && src >= it->header.minKey) {
             rs = find_edge_in_lonely_SStableCache(src, dst, property, property_id,
@@ -2694,7 +2492,7 @@ Status LSMStore::find_edge_in_SStableCache(VertexId_t src, VertexId_t dst,
             if (rs == Status::kNotFound) { // not found in the edge list of this file
               continue;
             } else {
-              local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+              local_sv_.version_memtable = nullptr;
               return rs;
             }
           }
@@ -2704,18 +2502,9 @@ Status LSMStore::find_edge_in_SStableCache(VertexId_t src, VertexId_t dst,
       
       rs = find_edge_by_levelindex(src, dst, property, local_sv_, property_id,
                                    is_out, edge_type);
-      local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+      local_sv_.version_memtable = nullptr;
       return rs;
     }
-
-Status LSMStore::find_edge_in_LazyFile(VertexId_t src, VertexId_t dst,
-              std::string* property, int property_id, LazyUpdate *lu,
-              bool is_out, uint8_t edge_type){
-        (void)is_out;
-        (void)edge_type;
-        auto rs = lu->getData(src, dst, *property, property_id);        
-        return rs;
-      }
 
 Status LSMStore::find_edge_in_lonely_SStableCache(VertexId_t src, VertexId_t dst,
           std::string* property, int property_id, SSTableCache* it,
@@ -2748,28 +2537,6 @@ Status LSMStore::find_edge_in_lonely_SStableCache(VertexId_t src, VertexId_t dst
                            kLatestPropertyCommit,
                            property)) {
       return Status::kOk;
-    }
-    // Lazy files contain updates newer than the base SST property.
-    if(rs == Status::kOk){
-      auto& store_cp =  local_sv_.get_lazyfile_store();
-      auto iter = store_cp.find(std::make_pair(it->header.timeStamp, property_id));
-      if(iter != store_cp.end()){
-        for(int id = iter->second.size() - 1; id >= 0; id --){
-          auto lf = iter->second[id];
-          int Edge_Offset = lf->Get_Reseted_EdgeBody_Offset();
-          int index_Offset = lf->Get_Reseted_Index_Offset();
-          tmp_Edge tmp_edge;
-          while(lf->get_next_edge(Edge_Offset, index_Offset, tmp_edge)){
-            if(tmp_edge.src == src && tmp_edge.dst == dst
-                && tmp_edge.is_out == is_out
-                && tmp_edge.edge_type == edge_type){
-              *property = tmp_edge.property;
-              return rs;
-            }
-          }
-        }
-      }
-      rs = Status::kOk;
     }
     // Fall back to the base SST property.
     if (rs == Status::kOk) {
@@ -2985,7 +2752,7 @@ void LSMStore::get_superversion(SuperVersion& local_sv) {
   #else
   {
     std::shared_lock r_lock(sv_.vm_rw_mtx);
-    local_sv.version_memtable_memproperty_lazyfile = sv_.version_memtable_memproperty_lazyfile;
+    local_sv.version_memtable = sv_.version_memtable;
   }
   #endif
 }
@@ -3000,7 +2767,7 @@ void LSMStore::get_superversion() {
     #else
     {
       std::shared_lock r_lock (sv_.vm_rw_mtx);
-      local_sv_.version_memtable_memproperty_lazyfile = sv_.version_memtable_memproperty_lazyfile;
+      local_sv_.version_memtable = sv_.version_memtable;
     }
     #endif
   }
@@ -3038,7 +2805,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
       }
     } else {
       bool found = false;
-      for (auto tb : local_sv_.version_memtable_memproperty_lazyfile->menTables) {
+      for (auto tb : local_sv_.version_memtable->menTables) {
         if (found == false) {
           rs = tb->get(src, dst, is_out, edge_type, property);
           if(rs != Status::kNotFound) {
@@ -3047,7 +2814,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
         }
       }
       if (rs != Status::kNotFound) {
-        local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+        local_sv_.version_memtable = nullptr;
         return rs;
       }
     }
@@ -3064,7 +2831,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
     // CSR 单层模式下，磁盘阶段直接走 CSR 查询路径。
     if (use_csr_disk_) {
       if (FLAGS_support_mulversion == true) {
-        local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+        local_sv_.version_memtable = nullptr;
       }
       return find_edge_in_csr_disk(src, dst, property, property_id,
                                    is_out, edge_type);
@@ -3118,14 +2885,14 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
       }
       FileId_t min_level_0_fid = local_sv_.findex.get_min_level_0_fid();
       bool found = false;
-      for (auto it : *(local_sv_.version_memtable_memproperty_lazyfile->current_->GetLevel0Files())) {
+      for (auto it : *(local_sv_.version_memtable->current_->GetLevel0Files())) {
         if (it->header.timeStamp >= min_level_0_fid
             && src <= it->header.maxKey && src >= it->header.minKey) {
           rs = find_edge(src, dst, property, it, property_id, is_out, edge_type);
           if (rs == Status::kNotFound) { // not found in the edge list of this file
             continue;
           } else {
-            local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+            local_sv_.version_memtable = nullptr;
             return rs;
           }
         }
@@ -3133,7 +2900,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
     }
 
     // level>=1
-    local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+    local_sv_.version_memtable = nullptr;
     rs = find_edge_by_levelindex(src, dst, property, local_sv_, property_id,
                                  is_out, edge_type);
     return rs;
@@ -3141,13 +2908,10 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
 
 Status LSMStore::GetEdge(VertexId_t src, VertexId_t dst, std::string* property,
                          int property_id, bool is_out, uint8_t edge_type){
-  // Search in visibility order: property buffer, memtable, then disk.
-   Status rs = Status::kNotFound;
-  rs = find_edge_in_memproperty(src, dst, property, property_id, is_out, edge_type);
-  if(rs != Status::kNotFound){
-    return rs;
-  }
-  rs = find_edge_in_memtable(src, dst, property, property_id, is_out, edge_type);
+  // GraphDb resolves property-buffer updates before reaching this shard. The
+  // storage engine searches the active memtables before its disk layout.
+  Status rs = find_edge_in_memtable(src, dst, property, property_id, is_out,
+                                    edge_type);
   if(rs != Status::kNotFound){
     return rs;
   }
@@ -3187,10 +2951,10 @@ Status LSMStore::LocateEdge(VertexId_t src, VertexId_t dst,
       return rs;
     }
   } else {
-    for (auto tb : local_sv_.version_memtable_memproperty_lazyfile->menTables) {
+    for (auto tb : local_sv_.version_memtable->menTables) {
       rs = tb->get(src, dst, is_out, edge_type, fid, seq);
       if (rs != Status::kNotFound) {
-        local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+        local_sv_.version_memtable = nullptr;
         location->in_memtable = true;
         location->target_id = fid;
         location->sequence = seq;
@@ -3201,7 +2965,7 @@ Status LSMStore::LocateEdge(VertexId_t src, VertexId_t dst,
 
   if (use_csr_disk_) {
     if (FLAGS_support_mulversion == true) {
-      local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+      local_sv_.version_memtable = nullptr;
     }
     rs = find_edge_seq_in_csr_disk(src, dst, fid, seq);
     if (rs != Status::kNotFound) {
@@ -3268,7 +3032,7 @@ Status LSMStore::LocateEdge(VertexId_t src, VertexId_t dst,
     }
 
     const FileId_t min_level_0_fid = local_sv_.findex.get_min_level_0_fid();
-    for (auto it : *(local_sv_.version_memtable_memproperty_lazyfile->current_->GetLevel0Files())) {
+    for (auto it : *(local_sv_.version_memtable->current_->GetLevel0Files())) {
       if (it->header.timeStamp >= min_level_0_fid
           && src <= it->header.maxKey && src >= it->header.minKey) {
         const int pos = it->get(src, dst);
@@ -3283,7 +3047,7 @@ Status LSMStore::LocateEdge(VertexId_t src, VertexId_t dst,
                                           is_out,
                                           edge_type);
         if (rs != Status::kNotFound) {
-          local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+          local_sv_.version_memtable = nullptr;
           location->in_memtable = false;
           location->target_id = it->header.timeStamp;
           location->sequence = seq;
@@ -3294,7 +3058,7 @@ Status LSMStore::LocateEdge(VertexId_t src, VertexId_t dst,
   }
 
   if (FLAGS_support_mulversion == true) {
-    local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+    local_sv_.version_memtable = nullptr;
   }
   rs = find_edge_by_levelindex(src, dst, fid, seq, local_sv_, is_out, edge_type);
   if (rs != Status::kNotFound) {
@@ -3330,7 +3094,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
       }
     } else {
       bool found = false;
-      for (auto tb : local_sv_.version_memtable_memproperty_lazyfile->menTables) {
+      for (auto tb : local_sv_.version_memtable->menTables) {
         if (found == false) {
           rs = tb->get(src, dst, fid, seq);
           if(rs != Status::kNotFound) {
@@ -3339,7 +3103,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
         }
       }
       if (rs != Status::kNotFound) {
-        local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+        local_sv_.version_memtable = nullptr;
         return rs;
       }
     }
@@ -3356,7 +3120,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
     // CSR 单层模式下，磁盘阶段直接走 CSR 查询路径。
     if (use_csr_disk_) {
       if (FLAGS_support_mulversion == true) {
-        local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+        local_sv_.version_memtable = nullptr;
       }
       return find_edge_seq_in_csr_disk(src, dst, fid, seq);
     }
@@ -3410,7 +3174,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
       }
       FileId_t min_level_0_fid = local_sv_.findex.get_min_level_0_fid();
       bool found = false;
-      for (auto it : *(local_sv_.version_memtable_memproperty_lazyfile->current_->GetLevel0Files())) {
+      for (auto it : *(local_sv_.version_memtable->current_->GetLevel0Files())) {
         if (it->header.timeStamp >= 0
             && src <= it->header.maxKey && src >= it->header.minKey) {
           fid = it->header.timeStamp;
@@ -3418,7 +3182,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
           if (rs == Status::kNotFound) { // not found in the edge list of this file
             continue;
           } else {
-            local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+            local_sv_.version_memtable = nullptr;
             return rs;
           }
         }
@@ -3426,7 +3190,7 @@ Status LSMStore::get_edge(VertexId_t src, VertexId_t dst,
     }
 
     // level>=1
-    local_sv_.version_memtable_memproperty_lazyfile = nullptr;
+    local_sv_.version_memtable = nullptr;
     rs = find_edge_by_levelindex(src, dst, fid, seq, local_sv_);
     return rs;
 }
@@ -3586,29 +3350,6 @@ Status LSMStore::find_edge_from_sstdata_cache(VertexId_t src, VertexId_t dst,
   #ifdef DEBUG_COST
     std::chrono::steady_clock::time_point query_time_find_propertyt1 = std::chrono::steady_clock::now();
   #endif
-
-  // Lazy files contain updates newer than the base SST property.
-  if(result == Status::kOk){
-    auto& store_cp = local_sv_.get_lazyfile_store();
-    auto iter = store_cp.find(std::make_pair(fileID, property_id));
-    if(iter != store_cp.end()){
-      for(int id = iter->second.size() - 1; id >= 0; id --){
-        auto lf = iter->second[id];
-        int Edge_Offset = lf->Get_Reseted_EdgeBody_Offset();
-        int Index_Offset = lf->Get_Reseted_Index_Offset();
-        tmp_Edge tmp_edge;
-        while(lf->get_next_edge(Edge_Offset, Index_Offset, tmp_edge)){
-          if(tmp_edge.src == src && tmp_edge.dst == dst
-              && tmp_edge.is_out == is_out
-              && tmp_edge.edge_type == edge_type){
-            *property = tmp_edge.property;
-            return result;
-          }
-        }
-      }
-    }
-    result = Status::kOk;
-  }
 
   // load property
   if (result == Status::kOk) {
@@ -4039,27 +3780,10 @@ EdgeIterator LSMStore::get_edges(VertexId_t src, const SequenceNumber_t seq,
   if (use_csr_disk_) {
     // CSR fast 路径：
     // - 仅构造“当前 src 的内存层迭代器 + 1个CSR磁盘迭代器”；
-    // - 避开原通用路径里 level0/lazyfile 的全量扫描与构造开销。
+    // - 避开通用路径里 level-0 候选文件的扫描与迭代器构造开销。
     get_superversion(local_sv_);
     std::vector<std::shared_ptr<EdgeIteratorBase>> prepared_iters;
-    prepared_iters.reserve(
-        local_sv_.get_memtable().size()
-        + (FLAGS_enable_memproperty ? local_sv_.get_memproperty().size() : 0)
-        + 1);
-
-    if (FLAGS_enable_memproperty) {
-      for (auto* mp : local_sv_.get_memproperty()) {
-        if (mp == nullptr || seq <= mp->GetStartTime()) {
-          continue;
-        }
-        auto mp_it = std::shared_ptr<EdgeIteratorBase>(
-            new NeighBors::MemEdgeIterator(
-                mp->get_vertex_adj(src), mp->GetFid(), mp->newest_edge));
-        if (mp_it->valid()) {
-          prepared_iters.emplace_back(std::move(mp_it));
-        }
-      }
-    }
+    prepared_iters.reserve(local_sv_.get_memtable().size() + 1);
 
     for (auto* tb : local_sv_.get_memtable()) {
       if (seq <= tb->GetStartTime()) {
@@ -4210,24 +3934,7 @@ EdgeIterator LSMStore::Get_Edges(VertexId_t src, const SequenceNumber_t seq,
     if (use_csr_disk_) {
       get_superversion(local_sv_);
       std::vector<std::shared_ptr<EdgeIteratorBase>> prepared_iters;
-      prepared_iters.reserve(
-          local_sv_.get_memtable().size()
-          + (FLAGS_enable_memproperty ? local_sv_.get_memproperty().size() : 0)
-          + 1);
-
-      if (FLAGS_enable_memproperty) {
-        for (auto* mp : local_sv_.get_memproperty()) {
-          if (mp == nullptr || seq <= mp->GetStartTime()) {
-            continue;
-          }
-          auto mp_it = std::shared_ptr<EdgeIteratorBase>(
-              new NeighBors::MemEdgeIterator(
-                  mp->get_vertex_adj(src), mp->GetFid(), mp->newest_edge));
-          if (mp_it->valid()) {
-            prepared_iters.emplace_back(std::move(mp_it));
-          }
-        }
-      }
+      prepared_iters.reserve(local_sv_.get_memtable().size() + 1);
 
       for (auto* tb : local_sv_.get_memtable()) {
         if (seq <= tb->GetStartTime()) {
@@ -4452,45 +4159,10 @@ MemTable* LSMStore::get_newmemTable() {
   }
 }
 
-MemProperty* LSMStore::get_newmemProperty() {
-  if (!FLAGS_enable_memproperty) {
-    return nullptr;
-  }
-  while (true) {
-    std::unique_lock<std::mutex> lk(memproperty_mux_);
-    if (!free_memProperties.empty()) {
-      auto table = free_memProperties.front();
-      // 此时，从队列中拿出来，意味着是被回收的im_mem，即不会有新的query读到，只有有
-      // 事务读完释放，所以只要读到0就可以释放, 即被重新使用
-      if (FLAGS_support_mulversion == true) {
-        if ((table->IsFlash() == true || table->IsLive() == false) &&
-            table->Getref() == 0) {
-          table->reset();  // 确保没有读任务
-          free_memProperties.pop();
-          return table;
-        }
-      } else {
-        table->reset();
-        free_memProperties.pop();
-        return table;
-      }
-    }
-    lk.unlock();
-    Sleep(0.0000001);
-  }
-}
-
 void LSMStore::recycle_memTable(MemTable* table) {
   {
     std::unique_lock<std::mutex> lk(memtable_mux_);
     free_menTables.push(table);
-  }
-}
-
-void LSMStore::recycle_memProperty(MemProperty* property) {
-  {
-    std::unique_lock<std::mutex> lk(memproperty_mux_);
-    free_memProperties.push(property);
   }
 }
 
@@ -4503,7 +4175,7 @@ void LSMStore::check_vertex_id(VertexId_t vertex_id) {
 void LSMGraph::open(const std::string &dir,
                     size_t max_vertex_num,
                     LSMGraph **db) {
-    *db = new LSMStore(dir, max_vertex_num, 1, FLAGS_memtable_num, FLAGS_memproperty_num);
+    *db = new LSMStore(dir, max_vertex_num, 1, FLAGS_memtable_num);
 }
 
 
@@ -4764,294 +4436,10 @@ bool LSMStore::CheckState() const {
 
 
 
-// TODO(correctness): Prevent a property-buffer flush from depending on free
-// capacity in another property buffer. Under sustained updates every buffer
-// can become full while the oldest flush is still trying to requeue records,
-// which stalls all writers.
-void LSMStore::save_memproperty_to_SST(MemProperty *memproperty) {
-  // 全局容器
-  std::map<std::pair<FileId_t, int>, std::vector<tmp_Edge>> fid_to_EdgeStore;
-  #pragma omp parallel
-  {
-    // 每个线程使用局部容器收集数据，避免并发写冲突
-    std::map<std::pair<FileId_t, int>, vector<tmp_Edge>> local_map;
-    VertexId_t local_max_v_num = vertex_id_.load(std::memory_order_relaxed);
-
-    #pragma omp for nowait
-    for(VertexId_t id = 0; id < local_max_v_num; id++) {
-        auto item = memproperty->vertex_adjs[id];
-        if(item != NULLPOINTER) {
-            auto mem_ptr = memproperty->get_vertex_adj(id);
-            mem_ptr->sort();
-            NeighBors::MemEdgeIterator it(mem_ptr);
-            write_max(&vertex_max_level_[id], Level_t(1));
-            for(; it.valid(); it.next()){
-                tmp_Edge tmp_edge;
-                tmp_edge.src = id;
-                tmp_edge.dst = it.dst_id();
-                tmp_edge.marker = it.marker();
-                tmp_edge.is_out = it.is_out();
-                tmp_edge.edge_type = it.edge_type();
-                tmp_edge.seq = it.sequence();
-
-                // 查找这条边对应的 fid
-                FileId_t fid;
-                SequenceNumber_t seq;
-                auto rs = get_edge(tmp_edge.src, tmp_edge.dst, fid, seq);
-
-                if(rs == Status::kNotFound){
-                  std::cout<<"mp落盘时没找到目标，跳过!!!\n";
-                  continue;
-                }
-                // TODO(correctness): A small fraction of memproperty flushes
-                // miss their target edge. Verify sequence filtering instead
-                // of silently relying on the skip above.
-
-                // 分析 property，注意可能有多个属性
-                std::string property = it.edge_data(-1).data();
-                int sub_property_id = 0;
-                for(auto c : property) {
-                    if(c == '|'){
-                        if(!tmp_edge.property.empty() && tmp_edge.property != "~INPLACED~"){
-                            local_map[std::make_pair(fid, sub_property_id)].push_back(tmp_edge);
-                            tmp_edge.property.clear();
-                        }
-                        sub_property_id++;
-                    }
-                    else {
-                        tmp_edge.property += c;
-                    }
-                }
-                if(!tmp_edge.property.empty() && tmp_edge.property != "~INPLACED~"){
-                    local_map[std::make_pair(fid, sub_property_id)].push_back(tmp_edge);
-                }
-            }
-        }
-    }
-      // 将每个线程的局部 map 合并到全局 map 中
-      #pragma omp critical
-      {
-          for(auto &entry : local_map){
-              auto key = entry.first;
-              auto &local_vec = entry.second;
-              fid_to_EdgeStore[key].insert(fid_to_EdgeStore[key].end(), local_vec.begin(), local_vec.end());
-          }
-      }
-  } // 并行区结束
-  // 先将 map 迭代器存入 vector
-  std::cout<<"分拣完成！\n";
-  std::vector<decltype(fid_to_EdgeStore.begin())> iterators;
-  for(auto it = fid_to_EdgeStore.begin(); it != fid_to_EdgeStore.end(); ++it) {
-      iterators.push_back(it);
-  }
-  std::set<FileId_t>rewrite_store;
-  // Dynamic scheduling balances SSTs with different update volumes.
-  #pragma omp parallel for schedule(dynamic)
-  for (size_t i = 0; i < iterators.size(); i++) {
-    auto it = iterators[i];
-    FileId_t fid = it->first.first;
-    int sub_property_id = it->first.second;
-    SuperVersion local_sv_;
-    get_superversion(local_sv_);
-
-    
-
-    bool in_memtable = false;
-    for (auto tb : local_sv_.version_memtable_memproperty_lazyfile->menTables) {
-        if (tb->GetFid() == fid) {
-          // In-memory targets are requeued rather than written as lazy files.
-          continue;
-            in_memtable = true;
-            std::cout<<"写回1：在内存size:"<<it->second.size()<<"--\n";
-            rewrite_store.insert(fid);
-            break;
-        }
-    }
-
-    if (!in_memtable) {
-        bool ok = false;
-        {
-          std::lock_guard<std::mutex> lock(lf_mutex);
-          auto it = sst_is_vaild_to_ins_lf.find(fid);
-          ok = it != sst_is_vaild_to_ins_lf.end();
-        }
-        if(!ok){
-          // Requeue records when the target SST no longer accepts deltas.
-          std::cout<<"写回2：不可插入size:"<<it->second.size()<<"fid="<<fid<<"--\n";
-          rewrite_store.insert(fid);
-          continue;
-        }
-        // Encode the lazy file using the CSR edge layout.
-        SequenceNumber_t newest_edge_ = 0;
-        Header header;
-        std::vector<Index> indexes;
-        char* edge_body = new char[24 * (it->second.size() + 1)];
-        int edge_body_ptr = 0;
-        std::string property;
-        std::sort(it->second.begin(), it->second.end());
-        indexes.emplace_back(it->second[0].src, edge_body_ptr);
-        for (auto &edge : it->second) {
-          if(edge.src != indexes.back().key){
-            indexes.emplace_back(edge.src, edge_body_ptr);
-          }
-          newest_edge_ = max(newest_edge_, edge.seq);
-
-
-          *(VertexId_t*)(edge_body + edge_body_ptr) = edge.dst;
-          edge_body_ptr += 8;
-          *(SequenceNumber_t*)(edge_body + edge_body_ptr) = edge.seq;
-          edge_body_ptr += 8;
-          *(uint32_t*)(edge_body + edge_body_ptr) =
-              EncodeLazyMarkerDirectionAndType(edge.marker, edge.is_out,
-                                               edge.edge_type);
-          edge_body_ptr += 4;
-          *(int*)(edge_body + edge_body_ptr) = property.size();
-          edge_body_ptr += 4;
-          property += edge.property;
-        }
-        // Append sentinel metadata.
-        indexes.emplace_back(INVALID_VERTEX_ID, edge_body_ptr);
-        *(VertexId_t*)(edge_body + edge_body_ptr) = INVALID_VERTEX_ID;
-        edge_body_ptr += 8;
-        *(SequenceNumber_t*)(edge_body + edge_body_ptr) = MAX_SEQ_ID;
-        edge_body_ptr += 8;
-        *(uint32_t*)(edge_body + edge_body_ptr) =
-            EncodeLazyMarkerDirectionAndType(false, true, 0);
-        edge_body_ptr += 4;
-        *(int*)(edge_body + edge_body_ptr) = property.size();
-        edge_body_ptr += 4;
-        
-        uint64_t temp_currentTime = __sync_fetch_and_add(&currentTime, 1);
-        header.index_size = indexes.size();
-        header.size = it->second.size() + 1;
-        header.timeStamp = temp_currentTime;
-        header.minKey = indexes[0].key;
-        header.maxKey = indexes[indexes.size() - 2].key;
-
-
-        std::string path = pLazyFileName(temp_currentTime);
-            {
-                std::ofstream file(path, std::ios::binary | std::ios::app);
-                if (!file) {
-                    std::cerr << "error: 打开文件错误！" << std::endl;
-                    exit(-1);
-                }
-                file.write(edge_body, 24 * (it->second.size() + 1));
-                file.write(property.data(), property.size());
-            }
-        delete[] edge_body;
-        
-        LazyFile* lf = new LazyFile(temp_currentTime, header, indexes, newest_edge_);
-        
-        sstdata_manager_.put_LazyFile(temp_currentTime, lf);
-        ok = try_ins_lf(fid, sub_property_id, lf);
-        if(!ok){
-          std::cout<<"写回3:插入失败size:"<<it->second.size()<<"--\n";
-          sstdata_manager_.del_LazyFile(temp_currentTime);
-          rewrite_store.insert(fid);
-          std::string path = pLazyFileName(temp_currentTime);
-          std::remove(path.c_str());
-        }
-    }
-  }
-    // Requeue updates whose target SST could not accept a lazy file.
-    for(auto fid:rewrite_store){
-      std::map<std::tuple<VertexId_t, VertexId_t, bool, uint8_t>, tmp_Edge> restore;
-      for(int i = 0; i < GetActiveSubPropertyNum(); i ++){
-        std::vector<tmp_Edge> tmp_edges = fid_to_EdgeStore[{fid, i}];
-        for(auto edge:tmp_edges){
-          if(!i){
-            restore[{edge.src, edge.dst, edge.is_out, edge.edge_type}] = edge;
-          } else {
-            restore[{edge.src, edge.dst, edge.is_out, edge.edge_type}].property += "|" + edge.property;
-          }
-        }
-      }
-      for(auto edge:restore){
-        std::string property = edge.second.property;
-        update_edge(std::get<0>(edge.first), std::get<1>(edge.first), property,
-                    edge.second.marker, edge.second.seq, std::get<2>(edge.first),
-                    std::get<3>(edge.first));
-      }
-    }
-  // Publish a version without the flushed property buffer.
-  std::cout<<"all save finished!\n";
-  memproperty->SetFlash(true);
-  memproperty->SetLive(false);
-
-  Version * v = new Version(l0_versionset_);
-  
-  l0_versionset_->VersionLock();
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
-  {
-    std::shared_lock r_lock(sv_.vm_rw_mtx);
-    old_vms = sv_.version_memtable_memproperty_lazyfile;
-  }
-
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
-  new_vms->batch_insert_tb(old_vms->menTables);
-  new_vms->batch_insert_pp(old_vms->memProperties);
-  new_vms->batch_insert_lf(&old_vms->sst_has_lf);
-
-  new_vms->remove_pp(memproperty);
-  new_vms->set_vs(l0_versionset_->GetCurrent());
-
-  {
-    std::unique_lock w_lock(sv_.vm_rw_mtx);
-    sv_.version_memtable_memproperty_lazyfile = new_vms;
-  }
-
-  global_version_id_.fetch_add(1, std::memory_order_acquire);
-  l0_versionset_->VersionUnLock();
-
-}
-
-
 SSTDataManager*  LSMStore::GetSSTDataManager(){
   return &sstdata_manager_;
 }
 
-
-bool LSMStore::try_ins_lf(FileId_t sst_id, int property_id, LazyFile* lf){
-  std::lock_guard<std::mutex> lock(lf_mutex);
-  auto it = sst_is_vaild_to_ins_lf.find(sst_id);
-  if(it == sst_is_vaild_to_ins_lf.end()){
-    return false;
-  }
-  // Attach the lazy file by publishing a new SuperVersion.
-  Version* v = new Version(l0_versionset_);
-  l0_versionset_->VersionLock();
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
-  {
-    std::shared_lock r_lock(sv_.vm_rw_mtx);
-    old_vms = sv_.version_memtable_memproperty_lazyfile;
-  }
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
-  new_vms->batch_insert_tb(old_vms->menTables);
-  new_vms->batch_insert_pp(old_vms->memProperties);
-  new_vms->batch_insert_lf(&old_vms->sst_has_lf);
-  new_vms->insert_lf(sst_id, property_id, lf);
-  new_vms->set_vs(l0_versionset_->GetCurrent());
-  {
-    std::unique_lock w_lock(sv_.vm_rw_mtx);
-    sv_.version_memtable_memproperty_lazyfile = new_vms;
-  }
-  global_version_id_.fetch_add(1, std::memory_order_acquire);
-  l0_versionset_->VersionUnLock();
-  return true;
-}
-
-void LSMStore::change_sst_state(FileId_t sst_id, bool state){
-  std::lock_guard<std::mutex> lock(lf_mutex);
-  if(state){
-    sst_is_vaild_to_ins_lf.insert({sst_id, true});
-  } else {
-    auto it = sst_is_vaild_to_ins_lf.find(sst_id);
-    if(it != sst_is_vaild_to_ins_lf.end()){
-      sst_is_vaild_to_ins_lf.erase(it);
-    }
-  }
-}
 
 void LSMStore::Debug(){
   std::cout<<"sst_dst" << sst_dst<<"--\n";
@@ -5078,140 +4466,5 @@ void LSMStore::clean(){
 
 }
 
-void LSMStore::Merge_Lazy_files_to_1(){
 
-  SuperVersion now_sv;
-  {
-    std::shared_lock r_lock(sv_.vm_rw_mtx);
-    now_sv.version_memtable_memproperty_lazyfile = sv_.version_memtable_memproperty_lazyfile;
-  }
-
-  std::map<std::pair<FileId_t, int>, std::vector<LazyFile*>> del_lf;
-  auto& lf_store = now_sv.get_lazyfile_store();
-  for(auto it: lf_store){
-    FileId_t fid = it.first.first;
-    int sub_property_id = it.first.second;
-    std::vector<LazyFile*> lf_store = it.second;
-    if (lf_store.size() < 2) {
-      continue;
-      for (auto lf : lf_store) {
-        del_lf[{fid, sub_property_id}].push_back(lf);
-      }
-      // Merge lazy files newest-first for each edge key.
-      SequenceNumber_t newest_edge_ = 0;
-      Header header;
-      std::vector<Index> indexes;
-      std::vector<tmp_Edge> ebuffer, estore;
-      std::string p_store;
-      std::vector<bool> vis(lf_store.size(), false);
-      std::vector<int> index_offsets, edge_offsets;
-      for (size_t i = 0; i < lf_store.size(); i++) {  // 后写入的永远最新
-        index_offsets.push_back(0);
-        edge_offsets.push_back(lf_store[i]->Get_Reseted_EdgeBody_Offset());
-        tmp_Edge tmp;
-        vis[i] = lf_store[i]->get_next_edge(edge_offsets[i], index_offsets[i],
-                                            tmp) == false;
-        ebuffer.push_back(tmp);
-      }
-      while (true) {
-        // find min
-        int min_index = -1;
-        for (int i = 0; i < lf_store.size(); i++) {
-          if (!vis[i]) {
-            if (min_index == -1 || (ebuffer[i] < ebuffer[min_index])) {
-              min_index = i;
-            }
-          }
-        }
-        if(min_index == -1){
-          break;
-        }
-
-        if(estore.empty()
-           || estore.back().src != ebuffer[min_index].src
-           || estore.back().dst != ebuffer[min_index].dst
-           || estore.back().is_out != ebuffer[min_index].is_out
-           || estore.back().edge_type != ebuffer[min_index].edge_type){
-          if(estore.empty()||(estore.back().src != ebuffer[min_index].src)){
-            indexes.emplace_back(ebuffer[min_index].src, estore.size() * 24);
-          }
-          estore.push_back(ebuffer[min_index]);
-          tmp_Edge tmp;
-          vis[min_index] = lf_store[min_index]->get_next_edge(edge_offsets[min_index], index_offsets[min_index], tmp) == false;
-          ebuffer[min_index] = tmp;
-          newest_edge_ = std::max(newest_edge_, estore.back().seq);
-        }
-      }
-      char * edge_body = new char[24 * (estore.size() + 1)];
-      for(int i = 0; i < estore.size(); i++){
-        *(VertexId_t*)(edge_body + i * 24) = estore[i].dst;
-        *(VertexId_t*)(edge_body + i * 24 + 8) = estore[i].seq;
-        *(uint32_t*)(edge_body + i * 24 + 16) =
-            EncodeLazyMarkerDirectionAndType(estore[i].marker,
-                                             estore[i].is_out,
-                                             estore[i].edge_type);
-        *(int*)(edge_body + i * 24 + 20) = p_store.size();
-        p_store+=estore[i].property;
-      }
-
-      // Append sentinel metadata.
-      indexes.emplace_back(INVALID_VERTEX_ID, estore.size() * 24);
-      *(VertexId_t*)(edge_body + estore.size() * 24) = INVALID_VERTEX_ID;
-      *(VertexId_t*)(edge_body + estore.size() * 24 + 8) = MAX_SEQ_ID;
-      *(uint32_t*)(edge_body + estore.size() * 24 + 16) =
-          EncodeLazyMarkerDirectionAndType(false, true, 0);
-      *(int*)(edge_body + estore.size() * 24 + 20) = p_store.size();
-
-      uint64_t temp_currenTime = __sync_fetch_and_add(&currentTime, 1);
-      header.index_size = indexes.size();
-      header.size = estore.size() + 1;
-      header.timeStamp = temp_currenTime;
-      header.minKey = indexes[0].key;
-      header.maxKey = indexes[indexes.size() - 2].key;
-
-      std::string path = pLazyFileName(temp_currenTime);
-      {
-        std::ofstream file(path, std::ios::binary | std::ios::app);
-        if(!file){
-          std::cerr<<"err:打开文件错误！\n";
-          exit(-1);
-        }
-        file.write(edge_body, 24 * (estore.size() + 1));
-        file.write(p_store.data(), p_store.size());
-      }
-      delete[] edge_body;
-
-      LazyFile* lf = new LazyFile(temp_currenTime, header, indexes, newest_edge_);
-      sstdata_manager_.put_LazyFile(temp_currenTime, lf);
-      bool ok = try_ins_lf(fid, sub_property_id, lf);
-      if(!ok){
-        std::cout<<"error：merge的lf重新挂载失败！\n";
-      }
-    }
-  }
-  // Publish the merged lazy-file set.
-  Version* v = new Version(l0_versionset_);
-  l0_versionset_->VersionLock();
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
-  {
-    std::shared_lock r_lock(sv_.vm_rw_mtx);
-    old_vms = sv_.version_memtable_memproperty_lazyfile;
-  }
-  std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
-  new_vms->batch_insert_tb(old_vms->menTables);
-  new_vms->batch_insert_pp(old_vms->memProperties);
-  new_vms->batch_insert_lf(&old_vms->sst_has_lf);
-  for(auto it : del_lf){
-    for(auto lf : it.second)
-    new_vms->remove_lf(it.first.first, it.first.second, lf);
-  }
-
-  new_vms->set_vs(l0_versionset_->GetCurrent());
-  {
-    std::unique_lock w_lock(sv_.vm_rw_mtx);
-    sv_.version_memtable_memproperty_lazyfile = new_vms;
-  }
-  global_version_id_.fetch_add(1, std::memory_order_acquire);
-  l0_versionset_->VersionUnLock();
-}
 }  // namespace lsmgraph

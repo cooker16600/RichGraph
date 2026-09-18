@@ -52,23 +52,16 @@ namespace lsmgraph {
 class LSMStore : public LSMGraph {
 private:
     std::atomic<MemTable*> memTable_;
-    std::atomic<MemProperty*>memProperty_;
     leveldb::port::Mutex mu_;
     leveldb::port::CondVar memtabl_state_cv_ GUARDED_BY(mu_);
 
     std::vector<MemTable*> memTable_list_;
-    std::vector<MemProperty*>memProperty_list_;
 
     std::queue<MemTable*> free_menTables;
-    std::queue<MemProperty*> free_memProperties;
 
     std::mutex memtable_mux_; // 仅仅用于管理memtable的空闲列表
     std::mutex memtable_insert_mux_;  // 用于管理多线程插入memtable
     std::condition_variable memtable_cv_; // 等待插入新memtable
-
-    std::mutex memproperty_mux_; // 仅仅用于管理memproperty的空闲列表
-    std::mutex memproperty_insert_mux_;  // 用于管理多线程插入memproperty
-    std::condition_variable memproperty_cv_; // 等待插入新memproperty
 
     // 保证mem, im_mem, versionset 是同一个版本
     std::mutex level_0_mux_; // update level-0 file in fileMetaCache[0]
@@ -96,10 +89,6 @@ private:
     SSTDataManager sstdata_manager_;
 
     DelRecordManage del_record_manager_;
-
-    //lazyfile的通讯
-    std::map<FileId_t, bool> sst_is_vaild_to_ins_lf;
-    std::mutex lf_mutex;
 
     PropertyObjectKind property_object_kind_{PropertyObjectKind::kEdge};
     uint32_t property_shard_id_{0};
@@ -212,7 +201,7 @@ private:
 
 public:
     LSMStore(const std::string &dir, const size_t max_vertex_num,
-             int num_threads, int memtable_num, int memproperty_num,
+             int num_threads, int memtable_num,
              std::vector<uint32_t> sub_property_lengths = {},
              size_t memtable_size = FLAGS_memtable_size,
              bool is_csr = false,
@@ -282,21 +271,11 @@ public:
                                  bool is_out = true,
                                  uint8_t edge_type = 0) override;
 
-    Status find_edge_in_memproperty(VertexId_t src, VertexId_t dst,
-                                    std::string* property, int property_id,
-                                    bool is_out = true,
-                                    uint8_t edge_type = 0) override;
-    
     Status find_edge_in_SStableCache(VertexId_t src, VertexId_t dst,
                                      std::string* property, int property_id,
                                      bool is_out = true,
                                      uint8_t edge_type = 0) override;
     
-    Status find_edge_in_LazyFile(VertexId_t src, VertexId_t dst,
-                                 std::string* property, int property_id,
-                                 LazyUpdate *lu, bool is_out = true,
-                                 uint8_t edge_type = 0) override;
-
     Status find_edge_in_lonely_SStableCache(VertexId_t src, VertexId_t dst,
                                             std::string* property, int property_id,
                                             SSTableCache* it,
@@ -382,11 +361,7 @@ public:
 
     MemTable* get_newmemTable();
 
-    MemProperty* get_newmemProperty();
-
     void recycle_memTable(MemTable* table);
-
-    void recycle_memProperty(MemProperty* property);
 
     void check_vertex_id(VertexId_t vertex_id);
 
@@ -420,24 +395,14 @@ public:
 
     bool CheckState() const;
 
-    void save_memproperty_to_SST(MemProperty* memProperty);
-
-    void Merge_Lazy_file(LazyUpdate *lazyupdate, int sub_property_id);
-
     SSTDataManager * GetSSTDataManager() override;
 
-
-    bool try_ins_lf(FileId_t sst_id, int proeprty, LazyFile* lf);
-
-    void change_sst_state(FileId_t sst_id, bool state);
 
     void Debug() override;
 
     void un_map() override;
 
     void clean() override;
-
-    void Merge_Lazy_files_to_1() override;
 
     Status AttachPropertyDelta(FileId_t target_fid,
                                int property_id,

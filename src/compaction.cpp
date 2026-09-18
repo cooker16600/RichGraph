@@ -280,9 +280,7 @@ void Compaction::DoCompactionWorkTwoWay(const int level,
                               level, buffer_manager,
                               tablecache_mutex_,
                               version_edit_,
-                              sstdata_manager_,
-                              sst_is_vaild_to_ins_lf_,
-                              lf_mutex_);
+                              sstdata_manager_);
   uint64_t temp_currentTime = __sync_fetch_and_add(&currentTime, 1);
   writer.Init(eFileName(temp_currentTime),
               pFileName(temp_currentTime),
@@ -1051,9 +1049,7 @@ void Compaction::ProcessMultiWaysCompaction(std::vector<Way>& ways,
                               level, buffer_manager,
                               tablecache_mutex_,
                               version_edit_,
-                              sstdata_manager_,
-                              sst_is_vaild_to_ins_lf_,
-                              lf_mutex_);
+                              sstdata_manager_);
   writer.Init(eFileName(temp_currentTime),
               pFileName(temp_currentTime),
               edge_cache[min_way_index].src_,
@@ -1234,9 +1230,7 @@ void Compaction::ProcessMultiWaysCompactionOpt(const int level,
                               level, buffer_manager,
                               tablecache_mutex_,
                               version_edit_,
-                              sstdata_manager_,
-                              sst_is_vaild_to_ins_lf_,
-                              lf_mutex_);
+                              sstdata_manager_);
   writer.Init(eFileName(temp_currentTime),
               pFileName(temp_currentTime),
               edge_cache[min_way_index].src_,
@@ -1917,40 +1911,24 @@ void Compaction::BackgroundCompaction() {
           l0_versionset_->LogAndApply(version_edit_, v);
           fileMetaCache_[0] = l0_versionset_->GetCurrent()->GetLevel0Files();
 
-          std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
+          std::shared_ptr<VersionAndMemTable> old_vms;
           {
             std::shared_lock read_lock(sv_.vm_rw_mtx);
-            old_vms = sv_.version_memtable_memproperty_lazyfile;
+            old_vms = sv_.version_memtable;
           }
-          std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms =
-              std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
+          std::shared_ptr<VersionAndMemTable> new_vms =
+              std::make_shared<VersionAndMemTable>();
           new_vms->batch_insert_tb(old_vms->menTables);
-          new_vms->batch_insert_pp(old_vms->memProperties);
-          new_vms->batch_insert_lf(&old_vms->sst_has_lf);
-          for (auto it : lf_need_del) {
-            for (auto file : it.second) {
-              new_vms->remove_lf(it.first.first, it.first.second, file);
-              int refs = file->Getref();
-            }
-          }
 
           new_vms->set_vs(l0_versionset_->GetCurrent());
           {
             std::unique_lock write_lock(sv_.vm_rw_mtx);
-            sv_.version_memtable_memproperty_lazyfile = new_vms;
+            sv_.version_memtable = new_vms;
           }
 
           global_version_id_.fetch_add(1, std::memory_order_acquire);
 
           l0_versionset_->VersionUnLock();
-          for (auto it : lf_need_del) {
-            for (auto file : it.second) {
-              sstdata_manager_.del_data(file->fid_);
-              auto rt = utils::rmfile(pLazyFileName(file->fid_).c_str());
-              delete file;
-            }
-          }
-          lf_need_del.clear();
         #ifdef MULTI_LEVEL_VERSION
         }
         #else
@@ -2068,7 +2046,6 @@ bool Compaction::ForceCompactAllL0ToL1() {
   merged_fids_[0].clear();
   merged_fids_[1].clear();
   delete_filemeta_set_.clear();
-  lf_need_del.clear();
   version_edit_.Clear();
   min_level_0_fid_ = 0;
 
@@ -2150,38 +2127,23 @@ bool Compaction::ForceCompactAllL0ToL1() {
     l0_versionset_->LogAndApply(version_edit_, v);
     fileMetaCache_[0] = l0_versionset_->GetCurrent()->GetLevel0Files();
 
-    std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vms;
+    std::shared_ptr<VersionAndMemTable> old_vms;
     {
       std::shared_lock read_lock(sv_.vm_rw_mtx);
-      old_vms = sv_.version_memtable_memproperty_lazyfile;
+      old_vms = sv_.version_memtable;
     }
-    std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms =
-        std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
+    std::shared_ptr<VersionAndMemTable> new_vms =
+        std::make_shared<VersionAndMemTable>();
     new_vms->batch_insert_tb(old_vms->menTables);
-    new_vms->batch_insert_pp(old_vms->memProperties);
-    new_vms->batch_insert_lf(&old_vms->sst_has_lf);
-    for (auto it : lf_need_del) {
-      for (auto file : it.second) {
-        new_vms->remove_lf(it.first.first, it.first.second, file);
-      }
-    }
     new_vms->set_vs(l0_versionset_->GetCurrent());
     {
       std::unique_lock write_lock(sv_.vm_rw_mtx);
-      sv_.version_memtable_memproperty_lazyfile = new_vms;
+      sv_.version_memtable = new_vms;
     }
 
     global_version_id_.fetch_add(1, std::memory_order_acquire);
 
     l0_versionset_->VersionUnLock();
-    for (auto it : lf_need_del) {
-      for (auto file : it.second) {
-        sstdata_manager_.del_data(file->fid_);
-        auto rt = utils::rmfile(pLazyFileName(file->fid_).c_str());
-        delete file;
-      }
-    }
-    lf_need_del.clear();
   }
 
 #ifndef MULTI_LEVEL_VERSION
@@ -2205,18 +2167,6 @@ bool Compaction::ForceCompactAllL0ToL1() {
   return true;
 }
 
-void Compaction::change_sst_state(FileId_t sst_id, bool state){
-  std::lock_guard<std::mutex> lock(*lf_mutex_);
-      if(state){
-        sst_is_vaild_to_ins_lf_.insert({sst_id, true});
-      } else {
-        auto it = sst_is_vaild_to_ins_lf_.find(sst_id);
-        if(it != sst_is_vaild_to_ins_lf_.end()){
-          sst_is_vaild_to_ins_lf_.erase(it);
-        }
-      }
-}
-
 void Compaction::clean(){
   ways.clear();
   std::vector<lsmgraph::Way>().swap(ways);
@@ -2236,12 +2186,6 @@ void Compaction::clean(){
 
   delete_filemeta_set_.clear();
   std::vector<SSTableCache*>().swap(delete_filemeta_set_);
-
-  sst_is_vaild_to_ins_lf_.clear();
-  std::map<lsmgraph::FileId_t, bool>().swap(sst_is_vaild_to_ins_lf_);
-
-  lf_need_del.clear();
-  std::map<std::pair<FileId_t, int>, std::vector<LazyFile*>>().swap(lf_need_del);  // 也适用于 unordered_map
 
 }
 } // lsmgraph namespace

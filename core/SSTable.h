@@ -47,9 +47,6 @@ public:
     // Store file paths for different property types
     std::vector<std::string> property_files;  // Store property files dynamically
 
-    // Store file paths for different property lazy update files
-    std::vector<std::string> property_lazy_files;  // Store lazy update files for properties
-
     SSTableCache(SSTDataManager& sstdata_manager, SequenceNumber_t newest_edge_):
                                         sstdata_manager_(sstdata_manager),
                                         newest_edge(newest_edge_),

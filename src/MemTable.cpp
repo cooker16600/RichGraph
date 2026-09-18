@@ -535,9 +535,6 @@ namespace lsmgraph {
       vertex_set = nullptr;
       cache->newest_edge = newest_edge;
       sstdata_manager_.put_data(temp_currentTime, cache->header.size, reinterpret_cast<uintptr_t>(cache), newest_edge);
-      // The new SST can now accept lazy-file property updates.
-      change_sst_state(cache->header.timeStamp, true);
-
       #ifdef DEBUG_COST
       std::chrono::steady_clock::time_point put_flush_waite_timet1 = std::chrono::steady_clock::now();
       #endif
@@ -573,17 +570,14 @@ namespace lsmgraph {
           std::shared_ptr<VersionAndMemTable>
           old_vm = std::atomic_load(&sv_.version_memtable);
           #else
-          std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> old_vm;
+          std::shared_ptr<VersionAndMemTable> old_vm;
           {
             std::shared_lock r_lock(sv_.vm_rw_mtx);
-            old_vm = sv_.version_memtable_memproperty_lazyfile;
+            old_vm = sv_.version_memtable;
           }
           #endif
-          std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> new_vms = std::make_shared<VersionAndMemTableAndMemPropertyAndLf>();
+          std::shared_ptr<VersionAndMemTable> new_vms = std::make_shared<VersionAndMemTable>();
           new_vms->batch_insert_tb(old_vm->menTables);
-          new_vms->batch_insert_pp(old_vm->memProperties);
-          new_vms->batch_insert_lf(&old_vm->sst_has_lf);
-
           new_vms->remove_tb(this);
           new_vms->set_vs(l0_versionset_->GetCurrent());
           #ifndef VM_RW_LOCK
@@ -591,7 +585,7 @@ namespace lsmgraph {
           #else
           {
             std::unique_lock w_lock(sv_.vm_rw_mtx);
-            sv_.version_memtable_memproperty_lazyfile = new_vms;
+            sv_.version_memtable = new_vms;
           }
           #endif
           global_version_id_.fetch_add(1, std::memory_order_acquire);
@@ -796,15 +790,4 @@ namespace lsmgraph {
       neighbors->update_edge(dst, seq, markear, tmp_property);
     }
 
-    void MemTable::change_sst_state(FileId_t sst_id, bool state){
-      std::lock_guard<std::mutex> lock(*lf_mutex_);
-      if(state){
-        sst_is_vaild_to_ins_lf_.insert({sst_id, true});
-      } else {
-        auto it = sst_is_vaild_to_ins_lf_.find(sst_id);
-        if(it != sst_is_vaild_to_ins_lf_.end()){
-          sst_is_vaild_to_ins_lf_.erase(it);
-        }
-      }
-    }
 }

@@ -42,7 +42,7 @@ using PropertyUpdateFlushCallback = std::function<bool(
     bool target_is_persistent,
     std::string* error)>;
 
-// Engine-owned replacement for benchmark-local MemProperty buffers.
+// Engine-owned buffering and flush coordination for property updates.
 // Visibility protocol:
 //  1. Submit publishes the newest value in pending_ before acknowledging it.
 //  2. The worker creates and publishes the durable delta file.

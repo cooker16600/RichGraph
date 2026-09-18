@@ -52,15 +52,6 @@ std::string pFileName_with_id(const std::string& property_file, int id) {
   return property_file + "_" + std::to_string(id);
 }
 
-std::string pLazyFileName_with_id(uint64_t current_time, int id) {
-  return GetCurrentDbPath() + "/" + std::to_string(current_time) +
-         ".sst_p_" + std::to_string(id) + "_l";
-}
-
-std::string pLazyFileName(uint64_t current_time) {
-  return GetCurrentDbPath() + "/" + std::to_string(current_time) + ".sst_l";
-}
-
 VertexId_t get_dst(const char* data) {
   const uint32_t low = ReadUint32(data + 4);
   const uint32_t high_part = ReadUint32(data + 12);

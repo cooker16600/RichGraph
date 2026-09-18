@@ -448,22 +448,6 @@ namespace lsmgraph {
         if (sv_ == nullptr || sv_snapshot_ == nullptr) {
           return;
         }
-        
-
-        // memproperty
-        if (FLAGS_enable_memproperty) {
-          for (auto mp: sv_->get_memproperty()) {
-            if (mp == nullptr || seq_ <= mp->GetStartTime()) {
-              continue;
-            }
-            it = std::shared_ptr<EdgeIteratorBase>(new NeighBors::MemEdgeIterator(mp->get_vertex_adj(src), mp->GetFid(), mp->newest_edge));
-            
-            if (it->valid()) {
-              it_array.emplace_back(it);
-            }
-          }
-        }
-
         // memtable
         for (auto tb: sv_->get_memtable()) {
           if (seq_ <= tb->GetStartTime()) {
@@ -509,24 +493,6 @@ namespace lsmgraph {
         }
       }
 
-      void find_LF(FileId_t fid, VertexId_t src, SSTDataManager &sstdata_manager){
-        LazyFile* lf = sstdata_manager.get_LazyFile(fid);
-
-        int pos = lf->get(src);
-
-        if (pos < 0) {
-          return;
-        }
-        int begin = lf->indexs[pos].offset;
-        int end = lf->indexs[pos+1].offset;
-
-        std::shared_ptr<EdgeIteratorBase> it_temp = std::shared_ptr<EdgeIteratorBase>(new LFEdgeIterator(lf->file_ptr + begin, lf->file_ptr + lf->Get_Reseted_Property_Offset(), end - begin, fid, lf->newest_edge));
-        if(it_temp->valid()){
-          it_array.emplace_back(it_temp);
-        }
-
-      }
-
       Status find_iterator_sst(SSTableCache *sst_it, VertexId_t src,
         SSTDataManager &sstdata_manager, int property_id) {
 
@@ -536,19 +502,6 @@ namespace lsmgraph {
         if (pos < 0) {
           return Status::kNotFound;
         }
-        // Apply newer lazy-file records before the SST base data.
-
-        auto& store_cp = sv_->get_lazyfile_store();
-
-        auto iter = store_cp.find(std::make_pair(sst_it->header.timeStamp, property_id));
-
-        if(iter != store_cp.end()){
-          for(auto lf: iter->second){
-            find_LF(lf->fid_, src, sstdata_manager);
-          }
-        }
-
-
         uint32_t offset = (sst_it->indexes)[pos].offset;
         uint32_t next_offset = (sst_it->indexes)[pos + 1].offset;
         if (FLAGS_OPEN_SSTDATA_CACHE == true) {
@@ -611,20 +564,6 @@ namespace lsmgraph {
             continue;
             }
 
-            
-            // Apply newer lazy-file records before the SST base data.
-
-            auto& store_cp = sv_->get_lazyfile_store();
-            
-            auto iter = store_cp.find(std::make_pair(fileID, property_id));
-
-            if(iter != store_cp.end()){
-              for(auto lf: iter->second){
-                find_LF(lf->fid_, src, sstdata_manager);
-              }
-            }
-
-
             offset = findex.get_offset(levelID);
             next_offset = findex.get_next_offset(levelID);
             assert(next_offset >= offset);
@@ -675,8 +614,8 @@ namespace lsmgraph {
           // share this TLS object, so clear it only when it still references
           // the snapshot held by this iterator.
           if (sv_ != nullptr
-              && sv_->version_memtable_memproperty_lazyfile == held_snapshot) {
-            sv_->version_memtable_memproperty_lazyfile = nullptr;
+              && sv_->version_memtable == held_snapshot) {
+            sv_->version_memtable = nullptr;
           }
           sv_snapshot_.reset();
         }
@@ -798,14 +737,14 @@ namespace lsmgraph {
 
       void hold_superversion_snapshot() {
         if (sv_ != nullptr) {
-          sv_snapshot_ = sv_->version_memtable_memproperty_lazyfile;
+          sv_snapshot_ = sv_->version_memtable;
         }
       }
 
       std::shared_ptr<EdgeIteratorBase> it = nullptr;
       std::vector<std::shared_ptr<EdgeIteratorBase>> it_array;
       SuperVersion *sv_;
-      std::shared_ptr<VersionAndMemTableAndMemPropertyAndLf> sv_snapshot_;
+      std::shared_ptr<VersionAndMemTable> sv_snapshot_;
       SequenceNumber_t seq_;
       bool is_out_ = true;
       uint8_t edge_type_ = 0;
